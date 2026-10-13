@@ -1,8 +1,9 @@
 # herdr-fleet
 
 A terminal dashboard for [herdr](https://herdr.dev) agent panes. One screen shows
-every agent's status, how long it has been in that state, its last line of output,
-and anything that looks stuck — plus the open-item counts of your markdown queues.
+every agent's status, model, context usage, how long it has been in that state,
+its last line of output, and anything that looks stuck — plus the open-item
+counts of your markdown queues.
 
 Built for a machine that runs a fleet of Claude Code agents in herdr panes and
 needs to see, at a glance, which pane needs attention.
@@ -16,14 +17,34 @@ needs to see, at a glance, which pane needs attention.
 | `PANE` | herdr pane id; `●` marks the focused pane |
 | `NAME` | the pane's title (or its label) |
 | `STATUS` | `working` / `idle` / `done` / `blocked`, from herdr |
-| `MODEL` | the model named in the pane's status line |
-| `CTX` | context used %, from the pane's status line |
-| `IN STATE` | time in the current state (`!` = past the stall budget) |
-| `FLAGS` | `dialog:` an approval prompt is waiting; `loop xN:` the same line N times |
-| `LAST OUTPUT` | the last real line of output |
+| `MODEL` | the model running in the pane |
+| `CTX` | context used % = tokens over the context window |
+| `IN STATE` | time in the current state, as observed since launch (`!` = past the stall budget) |
+| `FLAGS` | `loop xN:` the same Bash command N times; `blocked`; `dialog:` a waiting prompt |
+| `LAST OUTPUT` | the last line the agent wrote |
 
 A `queues` panel lists every `*.md` checklist in `--queue-dir` with `open`/`done`
 counts and the first open item.
+
+## How it reads the fleet
+
+`herdr agent read` returns pane text **clamped to the pane width**, which cuts the
+status line off before `model | ctx:%` — so that is not a reliable source. Instead,
+herdr-fleet follows the session id herdr reports for each Claude pane to the
+session transcript under `~/.claude/projects/*/<session-id>.jsonl` and reads, from
+the last assistant message:
+
+- the **model** and its **token usage** (`input + cache_read + cache_creation`, over
+  `--context-window`, default `1000000` for 1M-context models);
+- the last line of assistant **text**;
+- its recent `Bash` tool calls, for the **loop** flag (the same command 3+ times).
+
+For a pane with no transcript yet, or a non-Claude agent, it falls back to
+scraping the pane text. The `source` field in `--json` output says which was used
+(`transcript` or `pane`).
+
+The pane list itself comes from `herdr api snapshot` (falling back to
+`herdr agent list`). `--herdr` (or `$HERDR_BIN`) selects the executable.
 
 ## Install
 
@@ -40,7 +61,16 @@ cargo run --release -- tui --queue-dir ~/dev/CC-MAESTRO/queue
 ## Usage
 
 ```
-herdr-fleet [--herdr BIN] [--queue-dir DIR] [--interval SECS] [--stall-secs SECS] [COMMAND]
+herdr-fleet [OPTIONS] [COMMAND]
+
+Options:
+      --herdr <BIN>              herdr executable            [env: HERDR_BIN] [default: herdr]
+      --queue-dir <DIR>          markdown checklists to summarise
+      --claude-projects <DIR>    session transcripts          [env: CLAUDE_PROJECTS_DIR]
+                                 [default: $CLAUDE_CONFIG_DIR/projects or ~/.claude/projects]
+      --context-window <TOKENS>  context window for the ctx %  [default: 1000000]
+      --interval <SECS>          TUI refresh interval          [default: 2]
+      --stall-secs <SECS>        "working" past this = stalled [default: 900]
 
 Commands:
   tui    Run the interactive dashboard (default)
@@ -51,16 +81,15 @@ Commands:
 
 ```
 herdr-fleet · herdr 0.9.2-preview · 5 agents
-PANE      NAME                   STATUS   MODEL         CTX  LAST OUTPUT                        FLAGS
-w1D:pM    Deepseek agents with … idle     -               -  Reviewed the latest commit… 
-w19:pG    Shared image           done     -               -  Done: the review is on file.
-w1C:p3    Claude Code            idle     -               -  waiting for the next item
-w1F:p1    Claude Code            working  -               -  running the test suite
-w1E:p1    Autocompact thrashi…   working  -               -  retrying the last edit
+PANE      NAME                   STATUS   MODEL            CTX  LAST OUTPUT                       FLAGS
+w1D:pM    Deepseek agents with … done     Opus 5.5         18%  do you want to read the answers b…  loop x3: /home/dev/tools/inbox-wait…
+w19:pG    Shared image           done     deepseek-flash   38%  Q8 stays open until your Gmail S…
+w1C:p3    Claude Code            idle     -                 -   chris2@box:/home/dev/project-chro…
+w1F:p1    herdr-fleet accepta…   working  deepseek-flash   47%  Header is 3 rows but holds 2 li…
+w1E:p1    Autocompact thrashi…   working  deepseek-flash   56%  I'll report Q7's scores when th…
 ```
 
-`--json` prints the same snapshot as machine-readable JSON, so the dashboard can
-feed other tools.
+`--json` prints the same snapshot as machine-readable JSON.
 
 ## Keys
 
@@ -81,21 +110,18 @@ Point `--queue-dir` at any folder of markdown checklists. Each `*.md` file is
 summarised by its `- [ ]` (open) and `- [x]` (done) lines; nothing about the
 format is herdr- or project-specific.
 
-## How it reads herdr
-
-`herdr-fleet` shells out to the `herdr` CLI: `herdr api snapshot` (falling back to
-`herdr agent list`) for the pane list, and `herdr agent read <pane>` for each pane's
-tail. `--herdr` (or `$HERDR_BIN`) selects the executable.
-
 ## Limitations
 
-- `MODEL` and `CTX` come from the status line Claude Code prints at the bottom of a
-  pane. If the pane is narrower than that line, it is truncated and these columns
-  show `-`.
-- Time-in-state is measured from when `herdr-fleet` first sees a pane in a state,
-  so it starts at zero on launch and needs the dashboard open to accrue.
-- The loop and dialog detectors are heuristics over the pane text: a repeated
-  substantive line, and a small set of approval-dialog phrases.
+- **IN STATE** is counted from when herdr-fleet first sees a pane in a state, not
+  from herdr's own state-change time (herdr exposes a sequence number, not a
+  timestamp). It is labelled as observed-since-launch for that reason.
+- The `CTX` percentage is only as good as `--context-window`. It defaults to
+  1,000,000 (the 1M-context models this was built against).
+- A Claude pane with no assistant message in its transcript yet, or a non-Claude
+  agent, falls back to the clamped pane text — where `MODEL`, `CTX` and
+  `LAST OUTPUT` may be blank or show chrome.
+- The loop and dialog detectors are heuristics: a repeated Bash command in the
+  recent transcript, and a small set of approval-dialog phrases in pane text.
 
 ## Development
 

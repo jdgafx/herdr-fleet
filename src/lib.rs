@@ -13,4 +13,5 @@ pub mod herdr;
 pub mod model;
 pub mod parser;
 pub mod queue;
+pub mod transcript;
 pub mod tui;

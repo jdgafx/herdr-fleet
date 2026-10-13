@@ -15,12 +15,13 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Table
 use ratatui::{Frame, Terminal};
 
 use crate::herdr::Herdr;
-use crate::model::{AgentRow, Fleet};
+use crate::model::{AgentRow, Fleet, Options};
 use crate::parser::truncate;
 
 struct App {
     herdr: Herdr,
     queue_dir: Option<PathBuf>,
+    options: Options,
     interval: Duration,
     stall: Duration,
     fleet: Fleet,
@@ -34,10 +35,17 @@ struct App {
 }
 
 impl App {
-    fn new(herdr: Herdr, queue_dir: Option<PathBuf>, interval: Duration, stall: Duration) -> Self {
+    fn new(
+        herdr: Herdr,
+        queue_dir: Option<PathBuf>,
+        options: Options,
+        interval: Duration,
+        stall: Duration,
+    ) -> Self {
         Self {
             herdr,
             queue_dir,
+            options,
             interval,
             stall,
             fleet: Fleet::empty(),
@@ -51,7 +59,7 @@ impl App {
     }
 
     fn refresh(&mut self) {
-        match Fleet::collect(&self.herdr, self.queue_dir.as_deref()) {
+        match Fleet::collect(&self.herdr, self.queue_dir.as_deref(), &self.options) {
             Ok(fleet) => {
                 let now = Instant::now();
                 for a in &fleet.agents {
@@ -189,7 +197,7 @@ impl App {
         // a big empty box; the filler between them absorbs the slack.
         let has_queues = self.queue_dir.is_some() && !self.fleet.queues.is_empty();
         let table_h = (self.fleet.agents.len() as u16 + 3).clamp(4, 30);
-        let mut constraints = vec![Constraint::Length(3), Constraint::Length(table_h)];
+        let mut constraints = vec![Constraint::Length(4), Constraint::Length(table_h)];
         if has_queues {
             constraints.push(Constraint::Length(
                 (self.fleet.queues.len() as u16 + 2).clamp(3, 12),
@@ -243,6 +251,10 @@ impl App {
             Span::styled("done", Style::default().fg(Color::Green)),
             Span::raw(" "),
             Span::styled("stall/loop/dialog", Style::default().fg(Color::Red)),
+            Span::styled(
+                "   IN STATE: observed since launch",
+                Style::default().fg(Color::DarkGray),
+            ),
         ]);
         f.render_widget(
             Paragraph::new(vec![title, legend]).block(Block::default().borders(Borders::ALL)),
@@ -296,13 +308,13 @@ impl App {
         let widths = [
             Constraint::Length(1),
             Constraint::Length(8),
-            Constraint::Length(20),
+            Constraint::Length(24),
             Constraint::Length(8),
-            Constraint::Length(12),
+            Constraint::Length(16),
             Constraint::Length(5),
             Constraint::Length(8),
-            Constraint::Length(26),
-            Constraint::Min(10),
+            Constraint::Length(28),
+            Constraint::Min(20),
         ];
         let table = Table::new(rows, widths)
             .header(header)
@@ -407,6 +419,7 @@ impl App {
 pub fn run(
     herdr: Herdr,
     queue_dir: Option<PathBuf>,
+    options: Options,
     interval_secs: u64,
     stall_secs: u64,
 ) -> Result<()> {
@@ -414,6 +427,7 @@ pub fn run(
     let mut app = App::new(
         herdr,
         queue_dir,
+        options,
         Duration::from_secs(interval_secs.max(1)),
         Duration::from_secs(stall_secs.max(1)),
     );

@@ -46,6 +46,24 @@ pub fn is_border(line: &str) -> bool {
     !t.is_empty() && t.chars().all(|c| matches!(c, '─' | '━' | '═' | ' ' | '│'))
 }
 
+/// A Claude status line — including one the pane width has truncated before its
+/// first `|`, leaving just `user@host:path…`. Those must never be shown as the
+/// agent's last output.
+pub fn is_status_chrome(line: &str) -> bool {
+    let t = line.trim();
+    if parse_status_line(t).is_some() {
+        return true;
+    }
+    match t
+        .split_whitespace()
+        .next()
+        .and_then(|tok| tok.split_once('@'))
+    {
+        Some((user, rest)) => !user.is_empty() && rest.contains(':'),
+        None => false,
+    }
+}
+
 /// Lines too short or too decorative to count as real output.
 pub fn is_substantive(line: &str) -> bool {
     let t = line.trim();
@@ -53,7 +71,7 @@ pub fn is_substantive(line: &str) -> bool {
         && !is_border(t)
         && t != "❯"
         && !t.starts_with('⏵')
-        && parse_status_line(t).is_none()
+        && !is_status_chrome(t)
 }
 
 /// Collapse runs of whitespace so two near-identical lines compare equal.
@@ -66,11 +84,13 @@ pub fn normalize_line(line: &str) -> String {
 pub fn last_meaningful_line(lines: &[&str]) -> Option<String> {
     for line in lines.iter().rev() {
         let t = line.trim();
+        // `❯` is the input box: an empty prompt, or one carrying the greyed-out
+        // suggestion. Never the agent's output.
         if t.is_empty()
             || is_border(t)
             || t.starts_with('⏵')
-            || t == "❯"
-            || parse_status_line(t).is_some()
+            || t.starts_with('❯')
+            || is_status_chrome(t)
         {
             continue;
         }
@@ -161,5 +181,23 @@ mod unit {
     fn empty_status_line_is_none() {
         assert!(parse_status_line("").is_none());
         assert!(parse_status_line("a | b").is_none());
+    }
+
+    #[test]
+    fn truncated_status_line_is_chrome() {
+        let lines = [
+            "● Real output line from the agent.",
+            "  dev@box:/home/dev/project-alpha | Opus 5.5 | ctx:15%",
+            "  dev@box:/home/dev/project-alph…",
+            "❯ Try \"refactor tool-invoker.ts\"",
+        ];
+        // Both the full and the width-truncated status line are skipped, as is
+        // the input box and its suggestion.
+        assert_eq!(
+            last_meaningful_line(&lines).as_deref(),
+            Some("● Real output line from the agent.")
+        );
+        assert!(is_status_chrome("  dev@box:/home/dev/project-alph…"));
+        assert!(!is_status_chrome("● Real output line from the agent."));
     }
 }

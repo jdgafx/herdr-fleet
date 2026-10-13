@@ -10,6 +10,9 @@ needs to see, at a glance, which pane needs attention.
 
 ![herdr-fleet running against a live fleet](docs/screenshot.png)
 
+The capture is a real run against a live fleet; the queues panel uses
+[`docs/demo-queue`](docs/demo-queue) so no private checklist names are shown.
+
 ## What it shows
 
 | Column | Meaning |
@@ -118,8 +121,9 @@ format is herdr- or project-specific.
 - The `CTX` percentage is only as good as `--context-window`. It defaults to
   1,000,000 (the 1M-context models this was built against).
 - A Claude pane with no assistant message in its transcript yet, or a non-Claude
-  agent, falls back to the clamped pane text — where `MODEL`, `CTX` and
-  `LAST OUTPUT` may be blank or show chrome.
+  agent, falls back to the clamped pane text. `MODEL`/`CTX` are usually blank
+  there, but the status line (even truncated) and the input box are filtered out
+  of `LAST OUTPUT`.
 - The loop and dialog detectors are heuristics: a repeated Bash command in the
   recent transcript, and a small set of approval-dialog phrases in pane text.
 

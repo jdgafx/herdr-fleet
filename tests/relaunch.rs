@@ -135,6 +135,23 @@ fn the_real_dialog_lists_only_its_task_not_the_intro_or_options() {
 }
 
 #[test]
+fn live_tasks_that_contain_hint_words_are_never_dropped() {
+    for task in [
+        "enterprise-sync --watch",
+        "job-to-cancel.sh",
+        "The following will stop when you exit: npm run dev",
+    ] {
+        let text = format!(
+            "Background work is running\n  - sleep 60 holder\n  - {task}\n  1. Exit and stop tasks\n  2. Keep running\n"
+        );
+        match parse_exit_dialog(&text) {
+            Some(ExitDialog::Live { tasks }) => assert!(tasks.contains(&task.to_string()), "{task}: {tasks:?}"),
+            other => panic!("{task}: a live task must stop the relaunch, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn the_real_layout_with_only_leftovers_chooses_option_one() {
     let leftovers = REAL_DIALOG.replace("subagent · example web search", "sleep 3600 holder");
     match parse_exit_dialog(&leftovers) {

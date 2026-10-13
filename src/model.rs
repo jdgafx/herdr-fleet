@@ -14,6 +14,8 @@ use crate::transcript;
 /// How the row's detail columns were filled.
 pub const SOURCE_TRANSCRIPT: &str = "transcript";
 pub const SOURCE_PANE: &str = "pane";
+/// A Claude pane with no transcript yet: no detail columns, from no source.
+pub const SOURCE_NONE: &str = "none";
 
 /// Settings that steer where the row detail comes from.
 #[derive(Debug, Clone)]
@@ -132,20 +134,18 @@ impl AgentRow {
             last_line: String::new(),
             flags: Vec::new(),
             state_change_seq: info.state_change_seq,
-            source: SOURCE_PANE.to_string(),
+            source: SOURCE_NONE.to_string(),
         };
 
         // Preferred: the Claude session transcript. It has the full model id,
         // token usage and recent tool calls that the clamped pane text lacks.
         if fill_from_transcript(info, options, &mut row) {
             row.source = SOURCE_TRANSCRIPT.to_string();
-        }
-
-        // Fallback: scrape the pane text, for non-Claude agents only. For a
-        // Claude pane the transcript is the source, so Claude's own UI chrome
-        // (status line, input box, footer) can never be mistaken for output; a
-        // Claude pane with no transcript simply shows blanks.
-        if row.source != SOURCE_TRANSCRIPT && info.agent != "claude" {
+        } else if info.agent != "claude" {
+            // Fallback: scrape the pane text — for non-Claude agents only. A
+            // Claude pane is read from its transcript, so Claude's own UI chrome
+            // (status line, input box, footer) can never be mistaken for output,
+            // and one with no transcript yet shows blanks rather than chrome.
             let tail = herdr.read_tail(&info.pane_id, 60).unwrap_or_default();
             let lines: Vec<&str> = tail.lines().collect();
             if let Some(status) = lines
@@ -166,6 +166,7 @@ impl AgentRow {
             row.last_line = parser::last_meaningful_line(&lines)
                 .map(|s| truncate(&s, 120))
                 .unwrap_or_default();
+            row.source = SOURCE_PANE.to_string();
         }
 
         if info.agent_status == "blocked" {

@@ -28,7 +28,9 @@ mkdir -p "$(dirname "$out")"
 tmux new-session -d -s "$sess" -x "${size%x*}" -y "${size#*x}"
 tmux send-keys -t "$sess" "clear && $(printf '%q ' "$bin" "${args[@]}")" Enter
 sleep "$wait_s"
-tmux capture-pane -p -e -t "$sess" > "$raw"
+# Capture, then scrub the local home path: this PNG is committed to a public
+# repo, and `git grep` can never catch a leak that is only pixels.
+tmux capture-pane -p -e -t "$sess" | sed -E 's#(/home|/Users)/[^/[:space:]]+#\1/dev#g' > "$raw"
 tmux kill-session -t "$sess" 2>/dev/null || true
 
 python3 "$here/ansi_to_png.py" "$raw" "$out"

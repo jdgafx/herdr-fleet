@@ -5,7 +5,8 @@
 #
 # Env: BIN (default: target/release/herdr-fleet), QUEUE_DIR (optional),
 #      SCREENSHOT_SIZE (default 210x50 — not SIZE, which LLVM toolchains export),
-#      WAIT (seconds to let a refresh land, default 4)
+#      SCRUB_WORDS (optional regex of tokens the live panes may display and the
+#      PNG must not carry, e.g. local codenames), WAIT (seconds, default 4)
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -29,9 +30,14 @@ mkdir -p "$(dirname "$out")"
 tmux new-session -d -s "$sess" -x "${size%x*}" -y "${size#*x}"
 tmux send-keys -t "$sess" "clear && $(printf '%q ' "$bin" "${args[@]}")" Enter
 sleep "$wait_s"
-# Capture, then scrub the local home path: this PNG is committed to a public
-# repo, and `git grep` can never catch a leak that is only pixels.
-tmux capture-pane -p -e -t "$sess" | sed -E 's#(/home|/Users)/[^/[:space:]]+#\1/dev#g' > "$raw"
+# Capture, then scrub what must not reach the committed PNG: the local home
+# path, and any SCRUB_WORDS tokens the live panes happen to show. `git grep`
+# can never catch a leak that is only pixels.
+scrub='s#(/home|/Users)/[^/[:space:]]+#\1/dev#g'
+if [[ -n "${SCRUB_WORDS:-}" ]]; then
+  scrub="${scrub}; s/(${SCRUB_WORDS})/[redacted]/g"
+fi
+tmux capture-pane -p -e -t "$sess" | sed -E "$scrub" > "$raw"
 tmux kill-session -t "$sess" 2>/dev/null || true
 
 python3 "$here/ansi_to_png.py" "$raw" "$out"

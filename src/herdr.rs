@@ -163,7 +163,12 @@ impl Herdr {
         self.run(&["agent", "focus", pane]).map(|_| ())
     }
 
-    /// Focus the workspace a pane lives in (fallback when its agent is gone).
+    /// Focus the tab a pane lives in (fallback when the pane's agent is gone).
+    pub fn focus_tab(&self, tab: &str) -> Result<()> {
+        self.run(&["tab", "focus", tab]).map(|_| ())
+    }
+
+    /// Focus the workspace a pane lives in (last-resort fallback).
     pub fn focus_workspace(&self, workspace: &str) -> Result<()> {
         self.run(&["workspace", "focus", workspace]).map(|_| ())
     }

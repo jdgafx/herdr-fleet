@@ -155,7 +155,8 @@ is skipped for non-default paths), `--no-reload` skips the server reload.
 
 `back` works because the TUI records its own pane on start (`herdr pane current`,
 stored in `~/.local/state/herdr-fleet/back.json`) and focuses it again — falling
-back to the pane's workspace if its agent has exited in the meantime.
+back to the pane's tab (then its workspace) when the recorded pane has no agent
+to address, and exiting non-zero if the exact pane could not be focused.
 
 ## Queues
 

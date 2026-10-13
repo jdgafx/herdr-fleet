@@ -1,6 +1,6 @@
 //! Optional plugin: summarise a directory of markdown checklists.
 //!
-//! Nothing about it is herdr- or CC-MAESTRO-specific: point `--queue-dir` at
+//! Nothing about it is herdr- or project-specific: point `--queue-dir` at
 //! any folder of `- [ ]` / `- [x]` markdown lists.
 
 use std::fs;

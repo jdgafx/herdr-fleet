@@ -84,28 +84,37 @@ pub fn read_fleet_pane() -> Result<FleetPane> {
     serde_json::from_str(&text).with_context(|| format!("bad {}", path.display()))
 }
 
-/// Focus the recorded fleet pane. Prefers the pane's agent; falls back to its
-/// workspace, which also works after the agent in that pane has exited.
+/// Focus the recorded fleet pane. The pane's agent is the precise target; a
+/// plain shell pane (the TUI's normal home when no agent runs there) has none,
+/// so fall back to the recorded tab, whose active pane is where the fleet ran.
+/// If even that fails, move to the workspace but exit non-zero: the exact pane
+/// could not be focused.
 pub fn back(herdr: &Herdr) -> Result<String> {
     let fp = read_fleet_pane()?;
+    let age = now_epoch().saturating_sub(fp.recorded_at);
     match herdr.focus(&fp.pane_id) {
-        Ok(()) => Ok(format!(
-            "focused {} (recorded {}s ago)",
-            fp.pane_id,
-            now_epoch().saturating_sub(fp.recorded_at)
-        )),
-        Err(e) => {
-            herdr.focus_workspace(&fp.workspace_id).map_err(|e2| {
+        Ok(()) => Ok(format!("focused {} (recorded {age}s ago)", fp.pane_id)),
+        Err(pane_err) => {
+            if !fp.tab_id.is_empty() && herdr.focus_tab(&fp.tab_id).is_ok() {
+                return Ok(format!(
+                    "focused tab {} — pane {} has no agent to focus ({pane_err:#})",
+                    fp.tab_id, fp.pane_id
+                ));
+            }
+            herdr.focus_workspace(&fp.workspace_id).map_err(|workspace_err| {
                 anyhow::anyhow!(
-                    "focus {} failed ({e:#}); workspace {} focus failed ({e2:#})",
+                    "focus {} failed ({pane_err:#}); tab {} and workspace {} focus failed too ({workspace_err:#})",
                     fp.pane_id,
+                    fp.tab_id,
                     fp.workspace_id
                 )
             })?;
-            Ok(format!(
-                "focused workspace {} (pane {} not focusable: {e:#})",
-                fp.workspace_id, fp.pane_id
-            ))
+            bail!(
+                "focused workspace {} but not the recorded pane {} (no agent there, and tab {} focus failed: {pane_err:#})",
+                fp.workspace_id,
+                fp.pane_id,
+                fp.tab_id
+            );
         }
     }
 }

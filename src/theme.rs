@@ -52,7 +52,7 @@ impl Theme {
                 border: Color::Gray,
                 on_accent: Color::Black,
                 working: Color::Yellow,
-                idle: Color::Blue,
+                idle: Color::Cyan,
                 done: Color::Green,
                 blocked: Color::Red,
                 warn: Color::Yellow,

@@ -431,9 +431,30 @@ impl App {
         ])
     }
 
+    /// Cost as a five-cell gauge scaled to the fleet's highest spend, and the amount.
+    fn cost_line(&self, cost: Option<f64>, max: f64) -> Line<'static> {
+        let Some(c) = cost else {
+            return Line::from(Span::styled("-", Style::default().fg(self.theme.muted)));
+        };
+        let filled = if max > 0.0 {
+            ((c / max * 5.0).round() as usize).min(5)
+        } else {
+            0
+        };
+        Line::from(vec![
+            Span::styled("█".repeat(filled), Style::default().fg(self.theme.accent)),
+            Span::styled("░".repeat(5 - filled), Style::default().fg(self.theme.surface)),
+            Span::styled(
+                format!(" {}", price::fmt_usd(c)),
+                Style::default().fg(self.theme.text),
+            ),
+        ])
+    }
+
     /// Column widths sized to the data: NAME/MODEL/FLAGS get their content width
     /// (clamped, narrower below WIDE columns), and LAST OUTPUT takes what remains.
-    fn column_widths(&self, wide: bool) -> [Constraint; 10] {
+    /// Below WIDE the COST column is left out, so the alarms and the output keep room.
+    fn column_widths(&self, wide: bool) -> (Vec<Constraint>, usize, usize, usize) {
         let (name_max, model_max, flags_max) = if wide { (28, 18, 30) } else { (9, 9, 6) };
         let name = self
             .fleet
@@ -442,7 +463,7 @@ impl App {
             .map(|a| a.name.chars().count())
             .max()
             .unwrap_or(4)
-            .clamp(4, name_max) as u16;
+            .clamp(4, name_max);
         let model = self
             .fleet
             .agents
@@ -450,7 +471,7 @@ impl App {
             .map(|a| a.model.as_deref().map(|m| m.chars().count()).unwrap_or(0))
             .max()
             .unwrap_or(5)
-            .clamp(5, model_max) as u16;
+            .clamp(5, model_max);
         let flags = self
             .fleet
             .agents
@@ -458,19 +479,22 @@ impl App {
             .map(|a| a.flags.join("; ").chars().count())
             .max()
             .unwrap_or(5)
-            .clamp(5, flags_max) as u16;
-        [
+            .clamp(5, flags_max);
+        let mut widths = vec![
             Constraint::Length(1),
             Constraint::Length(6),
-            Constraint::Length(name),
+            Constraint::Length(name as u16),
             Constraint::Length(9),
-            Constraint::Length(model),
+            Constraint::Length(model as u16),
             Constraint::Length(if wide { 10 } else { 4 }),
-            Constraint::Length(7),
-            Constraint::Length(8),
-            Constraint::Length(flags),
-            Constraint::Min(if wide { 16 } else { 8 }),
-        ]
+        ];
+        if wide {
+            widths.push(Constraint::Length(12));
+        }
+        widths.push(Constraint::Length(8));
+        widths.push(Constraint::Length(flags as u16));
+        widths.push(Constraint::Min(if wide { 16 } else { 8 }));
+        (widths, name, model, flags)
     }
 
     fn render(&mut self, f: &mut Frame) {
@@ -527,6 +551,19 @@ impl App {
         }
     }
 
+    /// The status text: the full line when there is room, a shorter one when not.
+    fn header_status(&self, wide: bool) -> String {
+        if wide || self.status.starts_with("error") || self.fleet.herdr_version.is_empty() {
+            return self.status.clone();
+        }
+        format!(
+            "{} agents · {} queues · ~{} est spend",
+            self.fleet.agents.len(),
+            self.fleet.queues.len(),
+            price::fmt_usd(self.fleet.total_cost_usd)
+        )
+    }
+
     fn render_header(&self, f: &mut Frame, area: Rect, wide: bool) {
         let block = Block::default()
             .borders(Borders::ALL)
@@ -544,7 +581,7 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("  {}", self.status),
+                format!("  {}", self.header_status(wide)),
                 Style::default().fg(self.theme.text),
             ),
         ]);
@@ -580,37 +617,24 @@ impl App {
 
     fn render_table(&mut self, f: &mut Frame, area: Rect) {
         let wide = area.width >= WIDE;
-        let header = Row::new(vec![
-            "",
-            "PANE",
-            "NAME",
-            "STATUS",
-            "MODEL",
-            "CTX",
-            "COST",
-            "IN STATE",
-            "FLAGS",
-            "LAST OUTPUT",
-        ])
-        .style(
+        let mut heads = vec!["", "PANE", "NAME", "STATUS", "MODEL", "CTX"];
+        if wide {
+            heads.push("COST");
+        }
+        heads.extend(["IN STATE", "FLAGS", "LAST OUTPUT"]);
+        let header = Row::new(heads).style(
             Style::default()
                 .fg(self.theme.muted)
                 .add_modifier(Modifier::BOLD),
         );
 
-        let widths = self.column_widths(wide);
-        let name_w = match widths[2] {
-            Constraint::Length(w) => w as usize,
-            _ => 20,
-        };
-        let model_w = match widths[4] {
-            Constraint::Length(w) => w as usize,
-            _ => 12,
-        };
-        let flags_w = match widths[8] {
-            Constraint::Length(w) => w as usize,
-            _ => 20,
-        };
+        let (widths, name_w, model_w, flags_w) = self.column_widths(wide);
+        let max_cost = self
+            .fleet
+            .agents
+            .iter()
+            .filter_map(|a| a.cost_usd)
+            .fold(0.0_f64, f64::max);
 
         let rows: Vec<Row> = self
             .fleet
@@ -626,7 +650,7 @@ impl App {
                 } else {
                     self.theme.muted
                 };
-                Row::new(vec![
+                let mut cells = vec![
                     Cell::from(Span::styled(
                         if a.focused { "●" } else { " " },
                         Style::default().fg(self.theme.accent),
@@ -636,14 +660,17 @@ impl App {
                     Cell::from(self.status_pill(&a.status)),
                     Cell::from(truncate(a.model.as_deref().unwrap_or("-"), model_w)),
                     Cell::from(self.ctx_line(a.ctx_percent, wide)),
-                    Cell::from(a.cost_usd.map(price::fmt_usd).unwrap_or_else(|| "-".into())),
-                    Cell::from(self.state_line(a)),
-                    Cell::from(Span::styled(
-                        truncate(&flags, flags_w),
-                        Style::default().fg(flag_color),
-                    )),
-                    Cell::from(truncate(&a.last_line, 60)),
-                ])
+                ];
+                if wide {
+                    cells.push(Cell::from(self.cost_line(a.cost_usd, max_cost)));
+                }
+                cells.push(Cell::from(self.state_line(a)));
+                cells.push(Cell::from(Span::styled(
+                    truncate(&flags, flags_w),
+                    Style::default().fg(flag_color),
+                )));
+                cells.push(Cell::from(truncate(&a.last_line, 60)));
+                Row::new(cells)
             })
             .collect();
 
@@ -731,8 +758,11 @@ impl App {
     }
 
     fn render_footer(&self, f: &mut Frame, area: Rect) {
-        let hints =
-            " q quit  ·  r refresh  ·  ↑/k ↓/j move  ·  ⏎ focus pane  ·  space detail  ·  i send prompt ";
+        let hints = if area.width >= WIDE {
+            " q quit  ·  r refresh  ·  ↑/k ↓/j move  ·  ⏎ focus pane  ·  space detail  ·  i send prompt "
+        } else {
+            " q quit · r refresh · ↑↓ move · ⏎ focus · space detail · i prompt"
+        };
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 hints,

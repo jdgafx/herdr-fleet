@@ -1,0 +1,31 @@
+[package]
+name = "herdr-fleet"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "A terminal dashboard for herdr agent panes: status, model, context %, stalls, loops and approval dialogs at a glance."
+license = "MIT"
+repository = "https://github.com/jdgafx/herdr-fleet"
+readme = "README.md"
+keywords = ["herdr", "tui", "agents", "dashboard", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[lib]
+name = "herdr_fleet"
+path = "src/lib.rs"
+
+[[bin]]
+name = "herdr-fleet"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+ratatui = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

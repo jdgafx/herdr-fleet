@@ -1,0 +1,10 @@
+❯ cargo test --all
+   Compiling herdr-fleet v0.1.0
+error: could not compile herdr-fleet
+❯ cargo test --all
+   Compiling herdr-fleet v0.1.0
+error: could not compile herdr-fleet
+❯ cargo test --all
+   Compiling herdr-fleet v0.1.0
+error: could not compile herdr-fleet
+  dev@box:/home/dev/project-gamma | Haiku 5 | ctx:8%

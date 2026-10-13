@@ -1,0 +1,9 @@
+● I'll apply the change now.
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+
+────────────────────────────────────────────────────────────
+❯
+  dev@box:/home/dev/project-beta | Sonnet 5 | ctx:42%

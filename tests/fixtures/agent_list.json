@@ -1,0 +1,50 @@
+{
+  "id": "cli:agent:list",
+  "result": {
+    "agents": [
+      {
+        "agent": "claude",
+        "agent_status": "working",
+        "pane_id": "w1A:p1",
+        "tab_id": "w1A:t1",
+        "workspace_id": "w1A",
+        "cwd": "/home/dev/project-alpha",
+        "foreground_cwd": "/home/dev/project-alpha",
+        "focused": true,
+        "terminal_title": "◐ Claude Code",
+        "terminal_title_stripped": "Claude Code",
+        "completion_seq": 12,
+        "state_change_seq": 34
+      },
+      {
+        "agent": "claude",
+        "agent_status": "idle",
+        "pane_id": "w1B:p2",
+        "tab_id": "w1B:t1",
+        "workspace_id": "w1B",
+        "cwd": "/home/dev/project-beta",
+        "foreground_cwd": "/home/dev/project-beta",
+        "focused": false,
+        "terminal_title": "✳ Claude Code",
+        "terminal_title_stripped": "Claude Code",
+        "completion_seq": 8,
+        "state_change_seq": 9
+      },
+      {
+        "agent": "claude",
+        "agent_status": "done",
+        "pane_id": "w1C:p3",
+        "tab_id": "w1C:t1",
+        "workspace_id": "w1C",
+        "cwd": "/home/dev/project-gamma",
+        "foreground_cwd": "/home/dev/project-gamma",
+        "focused": false,
+        "terminal_title": "✳ Claude Code",
+        "terminal_title_stripped": "Claude Code",
+        "completion_seq": 20,
+        "state_change_seq": 20
+      }
+    ],
+    "type": "agent_list"
+  }
+}

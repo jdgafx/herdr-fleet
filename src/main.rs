@@ -1,11 +1,13 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use herdr_fleet::herdr::Herdr;
 use herdr_fleet::keys;
 use herdr_fleet::model::{Fleet, Options};
+use herdr_fleet::relaunch;
+use herdr_fleet::roster::{self, Roster};
 use herdr_fleet::transcript::TranscriptTracker;
 use herdr_fleet::tui;
 
@@ -42,8 +44,25 @@ struct Cli {
     #[arg(long, global = true)]
     alerts: bool,
 
+    /// Roster file: which pane runs which queue, with which launch flags
+    /// (default: $XDG_CONFIG_HOME/herdr-fleet/roster.toml)
+    #[arg(long, global = true, env = "HERDR_FLEET_ROSTER")]
+    roster: Option<PathBuf>,
+
     #[command(subcommand)]
     cmd: Option<Cmd>,
+}
+
+#[derive(Subcommand, Debug)]
+enum RosterCmd {
+    /// Seed the roster from the roster lines of a supervisor file
+    Import {
+        /// Markdown file with `- <pane> <queue> <launch> <folder>` lines
+        file: PathBuf,
+        /// Roster file to write (default: the --roster path)
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -58,6 +77,21 @@ enum Cmd {
     },
     /// Focus the pane herdr-fleet was started in (recorded when the TUI ran)
     Back,
+    /// Compare every roster pane's live launch with the roster; exits 1 on drift
+    Check,
+    /// Relaunch a roster pane fresh on its roster flags, then send its `/work <queue>`
+    Relaunch {
+        /// Pane id, e.g. w1F:p1
+        pane: String,
+        /// Print each step and change nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Manage the roster file
+    Roster {
+        #[command(subcommand)]
+        cmd: RosterCmd,
+    },
     /// Write the herdr key binding that runs `herdr-fleet back`
     InstallKeys {
         /// herdr config.toml to edit (default: $HERDR_CONFIG_PATH or ~/.config/herdr/config.toml)
@@ -76,11 +110,15 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let herdr = Herdr::new(cli.herdr);
 
+    let roster_path = cli.roster.clone().unwrap_or_else(roster::default_path);
     let mut options = Options::default();
     if let Some(dir) = cli.claude_projects {
         options.projects_dir = dir;
     }
     options.context_window = cli.context_window;
+    if roster_path.exists() {
+        options.roster = Some(Roster::load(&roster_path)?);
+    }
 
     match cli.cmd.unwrap_or(Cmd::Tui) {
         Cmd::Tui => tui::run(
@@ -103,6 +141,45 @@ fn main() -> Result<()> {
         }
         Cmd::Back => {
             println!("{}", keys::back(&herdr)?);
+            Ok(())
+        }
+        Cmd::Check => {
+            let roster = options.roster.clone().context("no roster to check")?;
+            let mut drifted = false;
+            println!("{:<8} {:<22} {:<8} DRIFT", "PANE", "QUEUE", "STATE");
+            for entry in &roster.panes {
+                let live = roster::live_launch(&herdr, &entry.pane);
+                let drift = roster::drift(entry, live.as_ref());
+                let state = match (entry.paused, live.is_some()) {
+                    (true, _) => "paused",
+                    (false, true) => "running",
+                    (false, false) => "stopped",
+                };
+                drifted |= !entry.paused && !drift.is_empty();
+                let verdict = if drift.is_empty() { "ok".into() } else { drift.join(", ") };
+                println!("{:<8} {:<22} {:<8} {}", entry.pane, entry.queue, state, verdict);
+            }
+            if drifted {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        Cmd::Relaunch { pane, dry_run } => {
+            let roster = options.roster.clone().context("no roster to relaunch from")?;
+            relaunch::relaunch(&herdr, &roster, &pane, dry_run)
+        }
+        Cmd::Roster {
+            cmd: RosterCmd::Import { file, out },
+        } => {
+            let text = std::fs::read_to_string(&file)
+                .with_context(|| format!("reading {}", file.display()))?;
+            let (roster, skipped) = Roster::import(&text)?;
+            let out = out.unwrap_or(roster_path);
+            roster.save(&out)?;
+            println!("wrote {} entries to {}", roster.panes.len(), out.display());
+            for pane in skipped {
+                println!("skipped {pane}: its line names no launch command; add it by hand");
+            }
             Ok(())
         }
         Cmd::InstallKeys {

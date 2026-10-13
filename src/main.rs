@@ -8,8 +8,9 @@ use herdr_fleet::keys;
 use herdr_fleet::model::{Fleet, Options};
 use herdr_fleet::relaunch;
 use herdr_fleet::roster::{self, Roster};
+use herdr_fleet::theme::ThemeName;
 use herdr_fleet::transcript::TranscriptTracker;
-use herdr_fleet::tui;
+use herdr_fleet::tui::{self, Look};
 
 /// A terminal dashboard for herdr agent panes.
 #[derive(Parser, Debug)]
@@ -48,6 +49,14 @@ struct Cli {
     /// (default: $XDG_CONFIG_HOME/herdr-fleet/roster.toml)
     #[arg(long, global = true, env = "HERDR_FLEET_ROSTER")]
     roster: Option<PathBuf>,
+
+    /// Colour theme: mocha (dark), latte (light) or ansi16 (the terminal's own 16 colours)
+    #[arg(long, global = true, value_enum, default_value_t = ThemeName::Mocha)]
+    theme: ThemeName,
+
+    /// Turn off the transition effects (the fade on a row whose state changed)
+    #[arg(long, global = true)]
+    no_fx: bool,
 
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -128,6 +137,10 @@ fn main() -> Result<()> {
             cli.interval,
             cli.stall_secs,
             cli.alerts,
+            Look {
+                theme: cli.theme,
+                fx: !cli.no_fx,
+            },
         ),
         Cmd::List { json } => {
             let mut tracker = TranscriptTracker::default();

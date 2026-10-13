@@ -8,13 +8,16 @@ use serde::Serialize;
 
 use crate::herdr::Herdr;
 use crate::parser::{self, truncate};
+use crate::price;
 use crate::queue::{scan_queue_dir, QueueFile};
-use crate::transcript;
+use crate::transcript::{self, TranscriptTracker};
 
 /// How the row's detail columns were filled.
 pub const SOURCE_TRANSCRIPT: &str = "transcript";
 pub const SOURCE_PANE: &str = "pane";
-/// A Claude pane with no transcript yet: no detail columns, from no source.
+/// A fresh Claude pane: the model comes from the launch arguments.
+pub const SOURCE_LAUNCH: &str = "launch";
+/// Nothing readable yet.
 pub const SOURCE_NONE: &str = "none";
 
 /// Settings that steer where the row detail comes from.
@@ -111,17 +114,28 @@ pub struct AgentRow {
     pub status: String,
     pub model: Option<String>,
     pub ctx_percent: Option<u8>,
+    /// Estimated spend for this session at list prices; `None` when unpriced.
+    pub cost_usd: Option<f64>,
     pub cwd: String,
     pub focused: bool,
     pub last_line: String,
     pub flags: Vec<String>,
     pub state_change_seq: i64,
-    /// `transcript` or `pane` — where the detail columns came from.
+    /// The most recent tool calls, oldest first (detail view).
+    pub tool_calls: Vec<transcript::ToolCall>,
+    /// `transcript`, `pane`, `launch` or `none` — where the detail columns came from.
     pub source: String,
+    #[serde(skip)]
+    transcript_path: Option<PathBuf>,
 }
 
 impl AgentRow {
-    fn from_info(herdr: &Herdr, info: &AgentInfo, options: &Options) -> AgentRow {
+    fn from_info(
+        herdr: &Herdr,
+        info: &AgentInfo,
+        options: &Options,
+        tracker: &mut TranscriptTracker,
+    ) -> AgentRow {
         let mut row = AgentRow {
             pane_id: info.pane_id.clone(),
             label: info.label.clone(),
@@ -129,23 +143,25 @@ impl AgentRow {
             status: info.agent_status.clone(),
             model: None,
             ctx_percent: None,
+            cost_usd: None,
             cwd: info.cwd.clone(),
             focused: info.focused,
             last_line: String::new(),
             flags: Vec::new(),
             state_change_seq: info.state_change_seq,
+            tool_calls: Vec::new(),
             source: SOURCE_NONE.to_string(),
+            transcript_path: None,
         };
 
         // Preferred: the Claude session transcript. It has the full model id,
         // token usage and recent tool calls that the clamped pane text lacks.
-        if fill_from_transcript(info, options, &mut row) {
+        if fill_from_transcript(info, options, tracker, &mut row) {
             row.source = SOURCE_TRANSCRIPT.to_string();
         } else if info.agent != "claude" {
             // Fallback: scrape the pane text — for non-Claude agents only. A
             // Claude pane is read from its transcript, so Claude's own UI chrome
-            // (status line, input box, footer) can never be mistaken for output,
-            // and one with no transcript yet shows blanks rather than chrome.
+            // (status line, input box, footer) can never be mistaken for output.
             let tail = herdr.read_tail(&info.pane_id, 60).unwrap_or_default();
             let lines: Vec<&str> = tail.lines().collect();
             if let Some(status) = lines
@@ -161,12 +177,25 @@ impl AgentRow {
             }
             if let Some((line, count)) = parser::detect_loop(&lines, 3) {
                 row.flags
-                    .push(format!("loop x{count}: {}", truncate(&line, 44)));
+                    .push(format!("loop x{count}: {}", parser::short_command(&line)));
             }
             row.last_line = parser::last_meaningful_line(&lines)
                 .map(|s| truncate(&s, 120))
                 .unwrap_or_default();
             row.source = SOURCE_PANE.to_string();
+        } else {
+            // A fresh Claude pane with no assistant turn yet: show the model
+            // it was launched with (from the process arguments) rather than a
+            // bare dash, or the word "fresh" when even that is unreadable.
+            match herdr.launch_model(&info.pane_id) {
+                Some(model) => {
+                    row.model = Some(transcript::pretty_model(&model));
+                    row.source = SOURCE_LAUNCH.to_string();
+                }
+                None => {
+                    row.model = Some("fresh".to_string());
+                }
+            }
         }
 
         if info.agent_status == "blocked" {
@@ -178,14 +207,19 @@ impl AgentRow {
 
 /// Fill the detail columns from the pane's Claude transcript. Returns false
 /// (leaving `row` untouched) when there is no usable transcript.
-fn fill_from_transcript(info: &AgentInfo, options: &Options, row: &mut AgentRow) -> bool {
+fn fill_from_transcript(
+    info: &AgentInfo,
+    options: &Options,
+    tracker: &mut TranscriptTracker,
+    row: &mut AgentRow,
+) -> bool {
     if info.agent != "claude" {
         return false;
     }
     let Some(path) = transcript::find_transcript(&options.projects_dir, &info.session_id()) else {
         return false;
     };
-    let Ok(detail) = transcript::read_info(&path, options.context_window) else {
+    let Ok(detail) = tracker.update(&path, options.context_window) else {
         return false;
     };
     if detail.model.is_none() && detail.ctx_tokens.is_none() {
@@ -193,13 +227,16 @@ fn fill_from_transcript(info: &AgentInfo, options: &Options, row: &mut AgentRow)
     }
     row.model = detail.model.as_deref().map(transcript::pretty_model);
     row.ctx_percent = detail.ctx_percent;
+    row.cost_usd = detail.cost_usd;
+    row.tool_calls = detail.tool_calls;
     if let Some(output) = detail.last_output {
         row.last_line = truncate(&output, 120);
     }
     if let Some((cmd, count)) = detail.loop_cmd {
         row.flags
-            .push(format!("loop x{count}: {}", truncate(&cmd, 44)));
+            .push(format!("loop x{count}: {}", parser::short_command(&cmd)));
     }
+    row.transcript_path = Some(path);
     true
 }
 
@@ -210,6 +247,8 @@ pub struct Fleet {
     pub fetched_at_epoch: u64,
     pub agents: Vec<AgentRow>,
     pub queues: Vec<QueueFile>,
+    /// Sum of the panes' estimated spend, USD.
+    pub total_cost_usd: f64,
 }
 
 impl Fleet {
@@ -220,24 +259,37 @@ impl Fleet {
             fetched_at_epoch: 0,
             agents: Vec::new(),
             queues: Vec::new(),
+            total_cost_usd: 0.0,
         }
     }
 
     /// Collect one snapshot: herdr state, each pane's detail, and (optionally)
     /// the checklist summaries.
-    pub fn collect(herdr: &Herdr, queue_dir: Option<&Path>, options: &Options) -> Result<Fleet> {
+    pub fn collect(
+        herdr: &Herdr,
+        queue_dir: Option<&Path>,
+        options: &Options,
+        tracker: &mut TranscriptTracker,
+    ) -> Result<Fleet> {
         let herdr_version = herdr.version();
         let infos = herdr.agents()?;
-        let agents = infos
+        let agents: Vec<AgentRow> = infos
             .iter()
-            .map(|info| AgentRow::from_info(herdr, info, options))
+            .map(|info| AgentRow::from_info(herdr, info, options, tracker))
             .collect();
+        let live: Vec<PathBuf> = agents
+            .iter()
+            .filter_map(|a| a.transcript_path.clone())
+            .collect();
+        tracker.retain(&live);
+        let total_cost_usd: f64 = agents.iter().filter_map(|a| a.cost_usd).sum();
         let queues = queue_dir.map(scan_queue_dir).unwrap_or_default();
         Ok(Fleet {
             herdr_version,
             fetched_at_epoch: now_epoch(),
             agents,
             queues,
+            total_cost_usd,
         })
     }
 
@@ -245,24 +297,26 @@ impl Fleet {
     pub fn render_text(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!(
-            "herdr-fleet · herdr {} · {} agents\n",
+            "herdr-fleet · herdr {} · {} agents · ~{} est spend\n",
             self.herdr_version,
-            self.agents.len()
+            self.agents.len(),
+            price::fmt_usd(self.total_cost_usd)
         ));
         out.push_str(&format!(
-            "{:<9} {:<22} {:<8} {:<12} {:>4}  {:<44} {}\n",
-            "PANE", "NAME", "STATUS", "MODEL", "CTX", "LAST OUTPUT", "FLAGS"
+            "{:<8} {:<22} {:<8} {:<14} {:>4} {:>7}  {:<44} {}\n",
+            "PANE", "NAME", "STATUS", "MODEL", "CTX", "COST", "LAST OUTPUT", "FLAGS"
         ));
         for a in &self.agents {
             out.push_str(&format!(
-                "{:<9} {:<22} {:<8} {:<12} {:>4}  {:<44} {}\n",
+                "{:<8} {:<22} {:<8} {:<14} {:>4} {:>7}  {:<44} {}\n",
                 a.pane_id,
                 truncate(&a.name, 22),
                 a.status,
-                a.model.clone().unwrap_or_else(|| "-".into()),
+                truncate(a.model.as_deref().unwrap_or("-"), 14),
                 a.ctx_percent
                     .map(|c| format!("{c}%"))
                     .unwrap_or_else(|| "-".into()),
+                a.cost_usd.map(price::fmt_usd).unwrap_or_else(|| "-".into()),
                 truncate(&a.last_line, 44),
                 a.flags.join("; "),
             ));

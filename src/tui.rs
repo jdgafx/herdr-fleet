@@ -1,6 +1,6 @@
 //! The ratatui dashboard.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Stdout;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -11,23 +11,43 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState};
 use ratatui::{Frame, Terminal};
 
 use crate::herdr::Herdr;
 use crate::model::{AgentRow, Fleet, Options};
 use crate::parser::truncate;
+use crate::price;
+use crate::transcript::{ToolCall, TranscriptTracker};
+
+/// The Space-key detail view: a snapshot taken when it opens.
+struct DetailView {
+    pane_id: String,
+    name: String,
+    status: String,
+    model: String,
+    ctx: String,
+    cost: String,
+    queue: Option<(String, String)>,
+    tools: Vec<ToolCall>,
+    output: Vec<String>,
+}
 
 struct App {
     herdr: Herdr,
     queue_dir: Option<PathBuf>,
     options: Options,
+    tracker: TranscriptTracker,
     interval: Duration,
     stall: Duration,
+    alerts: bool,
     fleet: Fleet,
     table: TableState,
     /// pane_id -> (state_change_seq, first seen in that state)
     since: HashMap<String, (i64, Instant)>,
+    /// Alert keys ("pane:kind") already fired; re-armed when the state clears.
+    alerted: HashSet<String>,
+    detail: Option<DetailView>,
     last_fetch: Instant,
     status: String,
     input: Option<String>,
@@ -41,16 +61,21 @@ impl App {
         options: Options,
         interval: Duration,
         stall: Duration,
+        alerts: bool,
     ) -> Self {
         Self {
             herdr,
             queue_dir,
             options,
+            tracker: TranscriptTracker::default(),
             interval,
             stall,
+            alerts,
             fleet: Fleet::empty(),
             table: TableState::default(),
             since: HashMap::new(),
+            alerted: HashSet::new(),
+            detail: None,
             last_fetch: Instant::now(),
             status: "starting…".into(),
             input: None,
@@ -59,7 +84,12 @@ impl App {
     }
 
     fn refresh(&mut self) {
-        match Fleet::collect(&self.herdr, self.queue_dir.as_deref(), &self.options) {
+        match Fleet::collect(
+            &self.herdr,
+            self.queue_dir.as_deref(),
+            &self.options,
+            &mut self.tracker,
+        ) {
             Ok(fleet) => {
                 let now = Instant::now();
                 for a in &fleet.agents {
@@ -79,16 +109,62 @@ impl App {
                         Some(0)
                     }),
                 }
+                if self.alerts {
+                    self.alert_on(&fleet);
+                }
                 self.status = format!(
-                    "{} agents · {} queues · herdr {}",
+                    "{} agents · {} queues · herdr {} · ~{} est spend",
                     fleet.agents.len(),
                     fleet.queues.len(),
-                    fleet.herdr_version
+                    fleet.herdr_version,
+                    price::fmt_usd(fleet.total_cost_usd)
                 );
                 self.fleet = fleet;
                 self.last_fetch = now;
             }
             Err(e) => self.status = format!("error: {e:#}"),
+        }
+    }
+
+    /// Fire one herdr notification per pane per kind when it first appears.
+    fn alert_on(&mut self, fleet: &Fleet) {
+        let mut current: Vec<(String, String)> = Vec::new();
+        for a in &fleet.agents {
+            if a.status == "blocked" {
+                current.push((a.pane_id.clone(), "blocked".into()));
+            }
+            if a.status == "working" {
+                if let Some((_, t)) = self.since.get(&a.pane_id) {
+                    if t.elapsed() >= self.stall {
+                        current.push((a.pane_id.clone(), "stalled".into()));
+                    }
+                }
+            }
+            if a.flags.iter().any(|f| f.starts_with("loop")) {
+                current.push((a.pane_id.clone(), "looping".into()));
+            }
+        }
+        let mut to_fire: Vec<(String, String)> = Vec::new();
+        for (pane, kind) in &current {
+            if self.alerted.insert(format!("{pane}:{kind}")) {
+                to_fire.push((pane.clone(), kind.clone()));
+            }
+        }
+        let live: HashSet<String> = current.iter().map(|(p, k)| format!("{p}:{k}")).collect();
+        self.alerted.retain(|k| live.contains(k));
+        for (pane, kind) in to_fire {
+            let body = fleet
+                .agents
+                .iter()
+                .find(|a| a.pane_id == pane)
+                .map(|a| truncate(&format!("{} — {}", a.status, a.last_line), 120))
+                .unwrap_or_default();
+            if let Err(e) = self
+                .herdr
+                .notify(&format!("herdr-fleet: {kind} {pane}"), &body)
+            {
+                self.status = format!("alert failed: {e:#}");
+            }
         }
     }
 
@@ -133,6 +209,68 @@ impl App {
         self.refresh();
     }
 
+    /// Space: open (or close) the detail view for the selected pane.
+    fn toggle_detail(&mut self) {
+        if self.detail.is_some() {
+            self.detail = None;
+            return;
+        }
+        let Some(i) = self.table.selected() else {
+            return;
+        };
+        let Some(row) = self.fleet.agents.get(i).cloned() else {
+            return;
+        };
+        let mut output: Vec<String> = Vec::new();
+        match self.herdr.read_tail(&row.pane_id, 30) {
+            Ok(tail) => {
+                let all: Vec<&str> = tail.lines().collect();
+                let start = all.len().saturating_sub(30);
+                for l in &all[start..] {
+                    output.push(l.trim_end().to_string());
+                }
+            }
+            Err(e) => output.push(format!("(pane read failed: {e:#})")),
+        }
+        let queue = self
+            .fleet
+            .queues
+            .iter()
+            .find(|q| {
+                let stem = PathBuf::from(&q.path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                stem.eq_ignore_ascii_case(&row.label)
+                    || stem.eq_ignore_ascii_case(&row.name)
+                    || q.name.eq_ignore_ascii_case(&row.label)
+            })
+            .map(|q| {
+                (
+                    q.name.clone(),
+                    q.first_open.clone().unwrap_or_else(|| "—".into()),
+                )
+            });
+        self.detail = Some(DetailView {
+            pane_id: row.pane_id.clone(),
+            name: row.name.clone(),
+            status: row.status.clone(),
+            model: row.model.clone().unwrap_or_else(|| "-".into()),
+            ctx: row
+                .ctx_percent
+                .map(|c| format!("{c}%"))
+                .unwrap_or_else(|| "-".into()),
+            cost: row
+                .cost_usd
+                .map(price::fmt_usd)
+                .unwrap_or_else(|| "-".into()),
+            queue,
+            tools: row.tool_calls.iter().rev().take(5).rev().cloned().collect(),
+            output,
+        });
+    }
+
     fn on_key(&mut self, key: KeyEvent) {
         if self.input.is_some() {
             match key.code {
@@ -161,6 +299,8 @@ impl App {
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
             KeyCode::Enter => self.focus_selected(),
+            KeyCode::Char(' ') => self.toggle_detail(),
+            KeyCode::Esc => self.detail = None,
             KeyCode::Char('i') if self.selected_pane().is_some() => {
                 self.input = Some(String::new());
             }
@@ -190,6 +330,47 @@ impl App {
             text.push('-');
         }
         (text, color)
+    }
+
+    /// Column widths sized to the data: NAME/MODEL/FLAGS get their content
+    /// width (clamped), and LAST OUTPUT takes what remains.
+    fn column_widths(&self) -> [Constraint; 10] {
+        let name = self
+            .fleet
+            .agents
+            .iter()
+            .map(|a| a.name.chars().count())
+            .max()
+            .unwrap_or(4)
+            .clamp(4, 28) as u16;
+        let model = self
+            .fleet
+            .agents
+            .iter()
+            .map(|a| a.model.as_deref().map(|m| m.chars().count()).unwrap_or(0))
+            .max()
+            .unwrap_or(5)
+            .clamp(5, 18) as u16;
+        let flags = self
+            .fleet
+            .agents
+            .iter()
+            .map(|a| a.flags.join("; ").chars().count())
+            .max()
+            .unwrap_or(5)
+            .clamp(5, 30) as u16;
+        [
+            Constraint::Length(1),
+            Constraint::Length(8),
+            Constraint::Length(name),
+            Constraint::Length(8),
+            Constraint::Length(model),
+            Constraint::Length(4),
+            Constraint::Length(7),
+            Constraint::Length(8),
+            Constraint::Length(flags),
+            Constraint::Min(16),
+        ]
     }
 
     fn render(&mut self, f: &mut Frame) {
@@ -224,6 +405,9 @@ impl App {
         self.render_footer(f, rows[i]);
         if let Some(buf) = self.input.clone() {
             self.render_input(f, f.area(), &buf);
+        }
+        if self.detail.is_some() {
+            self.render_detail(f, f.area());
         }
     }
 
@@ -270,6 +454,7 @@ impl App {
             "STATUS",
             "MODEL",
             "CTX",
+            "COST",
             "IN STATE",
             "FLAGS",
             "LAST OUTPUT",
@@ -280,42 +465,51 @@ impl App {
                 .add_modifier(Modifier::BOLD),
         );
 
+        let widths = self.column_widths();
+        let name_w = match widths[2] {
+            Constraint::Length(w) => w as usize,
+            _ => 20,
+        };
+        let model_w = match widths[4] {
+            Constraint::Length(w) => w as usize,
+            _ => 12,
+        };
+        let flags_w = match widths[8] {
+            Constraint::Length(w) => w as usize,
+            _ => 20,
+        };
+
         let rows: Vec<Row> = self
             .fleet
             .agents
             .iter()
             .map(|a| {
                 let (state, color) = self.state_cell(a);
+                let ctx_cell = match a.ctx_percent {
+                    Some(c) if c >= 80 => Cell::from(format!("{c}%"))
+                        .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                    Some(c) if c >= 50 => {
+                        Cell::from(format!("{c}%")).style(Style::default().fg(Color::Yellow))
+                    }
+                    Some(c) => Cell::from(format!("{c}%")),
+                    None => Cell::from("-"),
+                };
                 Row::new(vec![
                     Cell::from(if a.focused { "●" } else { " " }),
                     Cell::from(a.pane_id.clone()),
-                    Cell::from(truncate(&a.name, 20)),
+                    Cell::from(truncate(&a.name, name_w)),
                     Cell::from(a.status.clone()),
-                    Cell::from(a.model.clone().unwrap_or_else(|| "-".into())),
-                    Cell::from(
-                        a.ctx_percent
-                            .map(|c| format!("{c}%"))
-                            .unwrap_or_else(|| "-".into()),
-                    ),
+                    Cell::from(truncate(a.model.as_deref().unwrap_or("-"), model_w)),
+                    ctx_cell,
+                    Cell::from(a.cost_usd.map(price::fmt_usd).unwrap_or_else(|| "-".into())),
                     Cell::from(state),
-                    Cell::from(truncate(&a.flags.join("; "), 26)),
+                    Cell::from(truncate(&a.flags.join("; "), flags_w)),
                     Cell::from(truncate(&a.last_line, 60)),
                 ])
                 .style(Style::default().fg(color))
             })
             .collect();
 
-        let widths = [
-            Constraint::Length(1),
-            Constraint::Length(8),
-            Constraint::Length(24),
-            Constraint::Length(8),
-            Constraint::Length(16),
-            Constraint::Length(5),
-            Constraint::Length(8),
-            Constraint::Length(28),
-            Constraint::Min(20),
-        ];
         let table = Table::new(rows, widths)
             .header(header)
             .block(Block::default().borders(Borders::ALL).title(" fleet "))
@@ -326,6 +520,7 @@ impl App {
     }
 
     fn render_queues(&self, f: &mut Frame, area: Rect) {
+        // One line per queue: no wrapping, anything too wide is clipped.
         let lines: Vec<Line> = self
             .fleet
             .queues
@@ -350,22 +545,21 @@ impl App {
                         Style::default().fg(Color::DarkGray),
                     ),
                     Span::styled(
-                        truncate(q.first_open.as_deref().unwrap_or(""), 64),
+                        truncate(q.first_open.as_deref().unwrap_or(""), 52),
                         Style::default().fg(Color::Gray),
                     ),
                 ])
             })
             .collect();
         f.render_widget(
-            Paragraph::new(lines)
-                .block(Block::default().borders(Borders::ALL).title(" queues "))
-                .wrap(Wrap { trim: true }),
+            Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" queues ")),
             area,
         );
     }
 
     fn render_footer(&self, f: &mut Frame, area: Rect) {
-        let hints = " q quit  ·  r refresh  ·  ↑/k ↓/j move  ·  ⏎ focus pane  ·  i send prompt ";
+        let hints =
+            " q quit  ·  r refresh  ·  ↑/k ↓/j move  ·  ⏎ focus pane  ·  space detail  ·  i send prompt ";
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 hints,
@@ -390,6 +584,76 @@ impl App {
                 Block::default()
                     .borders(Borders::ALL)
                     .title(format!(" send prompt to {pane} ")),
+            ),
+            rect,
+        );
+    }
+
+    fn render_detail(&self, f: &mut Frame, area: Rect) {
+        let Some(d) = &self.detail else {
+            return;
+        };
+        let rect = centered(
+            area,
+            area.width.saturating_sub(8).min(110),
+            area.height.saturating_sub(2).min(26),
+        );
+        f.render_widget(Clear, rect);
+        let inner = rect.width.saturating_sub(2) as usize;
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {} ", d.pane_id),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(truncate(
+                &format!(
+                    "{}  ·  {}  ·  {}  ·  ctx {}  ·  ~{} est",
+                    d.name, d.status, d.model, d.ctx, d.cost
+                ),
+                inner.saturating_sub(9),
+            )),
+        ]));
+        match &d.queue {
+            Some((name, item)) => lines.push(Line::from(vec![
+                Span::styled("queue   ", Style::default().fg(Color::DarkGray)),
+                Span::raw(truncate(
+                    &format!("{name}: {item}"),
+                    inner.saturating_sub(8),
+                )),
+            ])),
+            None => lines.push(Line::from(Span::styled(
+                "queue   —",
+                Style::default().fg(Color::DarkGray),
+            ))),
+        }
+        lines.push(Line::from(Span::styled(
+            "last tool calls",
+            Style::default().fg(Color::DarkGray),
+        )));
+        if d.tools.is_empty() {
+            lines.push(Line::from("  —"));
+        }
+        for t in &d.tools {
+            lines.push(Line::from(truncate(
+                &format!("  {}: {}", t.name, t.detail),
+                inner,
+            )));
+        }
+        lines.push(Line::from(Span::styled(
+            "output (last 30 lines)",
+            Style::default().fg(Color::DarkGray),
+        )));
+        for l in &d.output {
+            lines.push(Line::from(truncate(l, inner)));
+        }
+        f.render_widget(
+            Paragraph::new(lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" pane detail — space/esc closes "),
             ),
             rect,
         );
@@ -422,7 +686,10 @@ pub fn run(
     options: Options,
     interval_secs: u64,
     stall_secs: u64,
+    alerts: bool,
 ) -> Result<()> {
+    // Record our own pane once, so `herdr-fleet back` can find it later.
+    let _ = crate::keys::record_fleet_pane(&herdr);
     let mut terminal = ratatui::init();
     let mut app = App::new(
         herdr,
@@ -430,6 +697,7 @@ pub fn run(
         options,
         Duration::from_secs(interval_secs.max(1)),
         Duration::from_secs(stall_secs.max(1)),
+        alerts,
     );
     app.refresh();
     let result = app.main_loop(&mut terminal);

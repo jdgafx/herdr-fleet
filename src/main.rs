@@ -4,7 +4,9 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use herdr_fleet::herdr::Herdr;
+use herdr_fleet::keys;
 use herdr_fleet::model::{Fleet, Options};
+use herdr_fleet::transcript::TranscriptTracker;
 use herdr_fleet::tui;
 
 /// A terminal dashboard for herdr agent panes.
@@ -36,6 +38,10 @@ struct Cli {
     #[arg(long, global = true, default_value_t = 900)]
     stall_secs: u64,
 
+    /// Desktop alerts (herdr notification) when a pane goes blocked, stalled or looping
+    #[arg(long, global = true)]
+    alerts: bool,
+
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -50,6 +56,20 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Focus the pane herdr-fleet was started in (recorded when the TUI ran)
+    Back,
+    /// Write the herdr key binding that runs `herdr-fleet back`
+    InstallKeys {
+        /// herdr config.toml to edit (default: $HERDR_CONFIG_PATH or ~/.config/herdr/config.toml)
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Key to bind
+        #[arg(long, default_value = "prefix+f")]
+        key: String,
+        /// Do not ask the running herdr server to reload the config
+        #[arg(long)]
+        no_reload: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -63,14 +83,35 @@ fn main() -> Result<()> {
     options.context_window = cli.context_window;
 
     match cli.cmd.unwrap_or(Cmd::Tui) {
-        Cmd::Tui => tui::run(herdr, cli.queue_dir, options, cli.interval, cli.stall_secs),
+        Cmd::Tui => tui::run(
+            herdr,
+            cli.queue_dir,
+            options,
+            cli.interval,
+            cli.stall_secs,
+            cli.alerts,
+        ),
         Cmd::List { json } => {
-            let fleet = Fleet::collect(&herdr, cli.queue_dir.as_deref(), &options)?;
+            let mut tracker = TranscriptTracker::default();
+            let fleet = Fleet::collect(&herdr, cli.queue_dir.as_deref(), &options, &mut tracker)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&fleet)?);
             } else {
                 print!("{}", fleet.render_text());
             }
+            Ok(())
+        }
+        Cmd::Back => {
+            println!("{}", keys::back(&herdr)?);
+            Ok(())
+        }
+        Cmd::InstallKeys {
+            config,
+            key,
+            no_reload,
+        } => {
+            let config = config.unwrap_or_else(keys::default_config_path);
+            print!("{}", keys::install_keys(&herdr, &config, &key, !no_reload)?);
             Ok(())
         }
     }

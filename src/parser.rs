@@ -153,6 +153,20 @@ pub fn detect_loop(lines: &[&str], min_repeat: usize) -> Option<(String, usize)>
         .or_else(|| hits.into_iter().next())
 }
 
+/// A compact, unambiguous label for a repeated command. A lone path-like
+/// token shows as its basename (`/srv/tools/inbox-wait.sh` -> `inbox-wait.sh`);
+/// anything else is the whitespace-normalised command, truncated for display.
+/// Detection itself always compares the full command — see
+/// [`crate::transcript::TranscriptTracker`].
+pub fn short_command(cmd: &str) -> String {
+    let mut words = cmd.split_whitespace();
+    let first = words.next().unwrap_or("");
+    if words.next().is_none() && first.contains('/') {
+        return first.rsplit('/').next().unwrap_or(first).to_string();
+    }
+    truncate(cmd, 44)
+}
+
 /// Trim to at most `max` characters (by char count), adding an ellipsis.
 pub fn truncate(s: &str, max: usize) -> String {
     let s = s.trim();
@@ -181,6 +195,15 @@ mod unit {
     fn empty_status_line_is_none() {
         assert!(parse_status_line("").is_none());
         assert!(parse_status_line("a | b").is_none());
+    }
+
+    #[test]
+    fn short_command_basenames_lone_paths_only() {
+        assert_eq!(short_command("/srv/tools/inbox-wait.sh"), "inbox-wait.sh");
+        assert_eq!(
+            short_command("cd /srv/app && ./check-web.sh"),
+            "cd /srv/app && ./check-web.sh"
+        );
     }
 
     #[test]

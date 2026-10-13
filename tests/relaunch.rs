@@ -10,7 +10,6 @@ Background work is running
   - poller (finished)
   1. Exit and stop tasks
   2. Keep running
-  Esc to cancel
 ";
 
 const LIVE: &str = "\

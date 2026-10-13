@@ -20,6 +20,8 @@ pub const DIALOG_HEADER: &str = "Background work is running";
 pub const EXIT_OPTION: &str = "Exit and stop tasks";
 /// Lines of pane text read for the exit dialog, both before and after `/exit`.
 const EXIT_TAIL_LINES: u32 = 60;
+/// The line the dialog shows before its task list.
+const INTRO_LINE: &str = "The following will stop when you exit:";
 /// Option labels the dialog offers. A numbered line is an option only when its text is
 /// exactly one of these; a task that merely starts with a label is still a task.
 const OPTION_LABELS: [&str; 5] = [
@@ -48,7 +50,7 @@ pub fn parse_exit_dialog(text: &str) -> Option<ExitDialog> {
     let mut key = None;
     for line in &lines[header + 1..] {
         let t = trim_frame(line);
-        if t.is_empty() || is_hint(t) {
+        if t.is_empty() || is_intro(t) {
             continue;
         }
         if let Some((number, label)) = option_number(t) {
@@ -70,16 +72,14 @@ pub fn parse_exit_dialog(text: &str) -> Option<ExitDialog> {
 
 /// Strip the box-drawing frame and surrounding spaces from a dialog line.
 fn trim_frame(line: &str) -> &str {
-    // `❯` is the selection cursor on the highlighted option.
-    line.trim_matches(|c: char| c.is_whitespace() || "│║┃|─═━❯".contains(c))
+    // `❯` is the selection cursor on the highlighted option; the box rules are the frame.
+    line.trim_matches(|c: char| c.is_whitespace() || "│║┃❯".contains(c))
 }
 
-fn is_hint(t: &str) -> bool {
-    let lower = t.to_lowercase();
-    lower.starts_with("enter")
-        || lower.contains("to cancel")
-        || lower.contains("esc to")
-        || lower.starts_with("the following will stop")
+/// The dialog's intro line. Only this exact line is dropped: any other line that is not
+/// an option is kept as a task, so an unknown line can only make the relaunch stop.
+fn is_intro(t: &str) -> bool {
+    t == INTRO_LINE
 }
 
 /// The number and label of a menu line such as `1. Exit and stop tasks`.

@@ -141,9 +141,11 @@ impl AgentRow {
             row.source = SOURCE_TRANSCRIPT.to_string();
         }
 
-        // Fallback: scrape the pane text. Clamped to the pane width, but the
-        // only source for non-Claude agents or a pane with no transcript yet.
-        if row.source != SOURCE_TRANSCRIPT {
+        // Fallback: scrape the pane text, for non-Claude agents only. For a
+        // Claude pane the transcript is the source, so Claude's own UI chrome
+        // (status line, input box, footer) can never be mistaken for output; a
+        // Claude pane with no transcript simply shows blanks.
+        if row.source != SOURCE_TRANSCRIPT && info.agent != "claude" {
             let tail = herdr.read_tail(&info.pane_id, 60).unwrap_or_default();
             let lines: Vec<&str> = tail.lines().collect();
             if let Some(status) = lines

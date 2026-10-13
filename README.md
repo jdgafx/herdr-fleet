@@ -42,9 +42,9 @@ the last assistant message:
 - the last line of assistant **text**;
 - its recent `Bash` tool calls, for the **loop** flag (the same command 3+ times).
 
-For a pane with no transcript yet, or a non-Claude agent, it falls back to
-scraping the pane text. The `source` field in `--json` output says which was used
-(`transcript` or `pane`).
+For a non-Claude agent it falls back to scraping the pane text. A Claude pane with
+no transcript yet shows blanks rather than Claude's own UI chrome. The `source`
+field in `--json` output says which was used (`transcript` or `pane`).
 
 The pane list itself comes from `herdr api snapshot` (falling back to
 `herdr agent list`). `--herdr` (or `$HERDR_BIN`) selects the executable.
@@ -87,7 +87,7 @@ herdr-fleet · herdr 0.9.2-preview · 5 agents
 PANE      NAME                   STATUS   MODEL            CTX  LAST OUTPUT                       FLAGS
 w1D:pM    Deepseek agents with … done     Opus 5.5         18%  do you want to read the answers b…  loop x3: /home/dev/tools/inbox-wait…
 w19:pG    Shared image           done     deepseek-flash   38%  Q8 stays open until your Gmail S…
-w1C:p3    Claude Code            idle     -                 -   chris2@box:/home/dev/project-chro…
+w1C:p3    Claude Code            idle     -                 -   -
 w1F:p1    herdr-fleet accepta…   working  deepseek-flash   47%  Header is 3 rows but holds 2 li…
 w1E:p1    Autocompact thrashi…   working  deepseek-flash   56%  I'll report Q7's scores when th…
 ```
@@ -120,10 +120,11 @@ format is herdr- or project-specific.
   timestamp). It is labelled as observed-since-launch for that reason.
 - The `CTX` percentage is only as good as `--context-window`. It defaults to
   1,000,000 (the 1M-context models this was built against).
-- A Claude pane with no assistant message in its transcript yet, or a non-Claude
-  agent, falls back to the clamped pane text. `MODEL`/`CTX` are usually blank
-  there, but the status line (even truncated) and the input box are filtered out
-  of `LAST OUTPUT`.
+- Pane text is read only for non-Claude agents, where it is clamped to the pane
+  width — so their `MODEL`/`CTX` are usually blank. The status line (even
+  truncated) and the input box are filtered out of their `LAST OUTPUT`.
+- A Claude pane with no assistant message in its transcript yet shows blanks
+  rather than guessing from Claude's own UI chrome.
 - The loop and dialog detectors are heuristics: a repeated Bash command in the
   recent transcript, and a small set of approval-dialog phrases in pane text.
 

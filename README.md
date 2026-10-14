@@ -97,6 +97,8 @@ cargo install --git https://github.com/jdgafx/herdr-fleet
 cargo install --path .
 ```
 
+Either way cargo puts the binary in `~/.cargo/bin`.
+
 ## Usage
 
 ```

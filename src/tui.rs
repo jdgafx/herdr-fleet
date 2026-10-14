@@ -331,6 +331,7 @@ impl App {
             return;
         };
         let pane = row.pane_id.clone();
+        self.status = format!("loading detail for {pane}…");
         self.worker.action(move |herdr| Done::Tail {
             text: herdr.read_tail(&pane, 30).map_err(|e| format!("{e:#}")),
             pane,

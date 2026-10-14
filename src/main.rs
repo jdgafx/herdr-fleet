@@ -41,6 +41,10 @@ struct Cli {
     #[arg(long, global = true, default_value_t = 900)]
     stall_secs: u64,
 
+    /// Minutes a working pane's transcript must be silent before it counts as stalled
+    #[arg(long, global = true, default_value_t = 10)]
+    quiet_mins: u64,
+
     /// Desktop alerts (herdr notification) when a pane goes blocked, stalled or looping
     #[arg(long, global = true)]
     alerts: bool,
@@ -125,6 +129,7 @@ fn main() -> Result<()> {
         options.projects_dir = dir;
     }
     options.context_window = cli.context_window;
+    options.quiet = std::time::Duration::from_secs(cli.quiet_mins * 60);
     if roster_path.exists() {
         options.roster = Some(Roster::load(&roster_path)?);
     }

@@ -1,7 +1,8 @@
 //! Fleet collection: turn herdr state plus pane text into renderable rows.
 
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use serde::Serialize;
@@ -30,6 +31,8 @@ pub struct Options {
     pub context_window: u64,
     /// The roster, when one is loaded; its panes get a `drift` flag when they differ.
     pub roster: Option<Roster>,
+    /// A working pane counts as stalled only when its transcript has been silent this long.
+    pub quiet: Duration,
 }
 
 impl Default for Options {
@@ -38,6 +41,7 @@ impl Default for Options {
             projects_dir: transcript::default_projects_dir(),
             context_window: 1_000_000,
             roster: None,
+            quiet: Duration::from_secs(10 * 60),
         }
     }
 }
@@ -129,6 +133,8 @@ pub struct AgentRow {
     pub tool_calls: Vec<transcript::ToolCall>,
     /// `transcript`, `pane`, `launch` or `none` — where the detail columns came from.
     pub source: String,
+    /// Seconds since the Claude transcript last changed; `None` when there is none.
+    pub transcript_quiet_secs: Option<u64>,
     #[serde(skip)]
     transcript_path: Option<PathBuf>,
 }
@@ -155,6 +161,7 @@ impl AgentRow {
             state_change_seq: info.state_change_seq,
             tool_calls: Vec::new(),
             source: SOURCE_NONE.to_string(),
+            transcript_quiet_secs: None,
             transcript_path: None,
         };
 
@@ -240,6 +247,11 @@ fn fill_from_transcript(
         row.flags
             .push(format!("loop x{count}: {}", parser::short_command(&cmd)));
     }
+    row.transcript_quiet_secs = fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .map(|d| d.as_secs());
     row.transcript_path = Some(path);
     true
 }
@@ -281,16 +293,25 @@ impl Fleet {
             .iter()
             .map(|info| AgentRow::from_info(herdr, info, options, tracker))
             .collect();
+        let queues = queue_dir.map(scan_queue_dir).unwrap_or_default();
         if let Some(roster) = &options.roster {
             for row in agents.iter_mut() {
                 let Some(entry) = roster.find(&row.pane_id) else {
                     continue;
                 };
+                row.name = roster_name(&entry.queue, &row.name);
                 let live = roster::live_launch(herdr, &row.pane_id);
                 let drift = roster::drift(entry, live.as_ref());
                 if !drift.is_empty() {
                     row.flags.push(format!("drift: {}", truncate(&drift.join(", "), 60)));
                 }
+            }
+        }
+        for row in agents.iter_mut() {
+            let queue = queue_for(&queues, &row.name, &row.label);
+            let open_unblocked = queue.map(|q| q.open.saturating_sub(q.blocked)).unwrap_or(0);
+            if let Some(reason) = waiting_reason(&row.status, &row.last_line, open_unblocked) {
+                row.flags.push(reason);
             }
         }
         let live: Vec<PathBuf> = agents
@@ -299,7 +320,6 @@ impl Fleet {
             .collect();
         tracker.retain(&live);
         let total_cost_usd: f64 = agents.iter().filter_map(|a| a.cost_usd).sum();
-        let queues = queue_dir.map(scan_queue_dir).unwrap_or_default();
         Ok(Fleet {
             herdr_version,
             fetched_at_epoch: now_epoch(),
@@ -352,6 +372,57 @@ impl Fleet {
         }
         out
     }
+}
+
+/// The name a pane shows: its roster queue when it has one, else the terminal name.
+pub fn roster_name(roster_queue: &str, terminal_name: &str) -> String {
+    if roster_queue.is_empty() {
+        terminal_name.to_string()
+    } else {
+        roster_queue.to_string()
+    }
+}
+
+/// A working pane is stalled only when it has been in state past `stall` AND its
+/// transcript has been silent for at least `quiet_min`. With no transcript (a
+/// non-Claude pane) the state time alone decides.
+pub fn is_stalled(
+    status: &str,
+    in_state: Duration,
+    stall: Duration,
+    quiet: Option<Duration>,
+    quiet_min: Duration,
+) -> bool {
+    status == "working" && in_state >= stall && quiet.map_or(true, |q| q >= quiet_min)
+}
+
+/// Why an idle or done pane is waiting on someone: its last output asks for a decision,
+/// or its queue has open items that are not blocked.
+pub fn waiting_reason(status: &str, last_line: &str, open_unblocked: usize) -> Option<String> {
+    if status != "idle" && status != "done" {
+        return None;
+    }
+    let lower = last_line.to_lowercase();
+    if lower.contains("decision for you")
+        || lower.contains("for chris")
+        || last_line.trim_end().ends_with('?')
+    {
+        return Some("waiting: decision".into());
+    }
+    (open_unblocked > 0).then(|| format!("waiting: {open_unblocked} open"))
+}
+
+/// The queue file a pane works on, matched by file stem to the pane's name or label.
+pub fn queue_for<'a>(queues: &'a [QueueFile], name: &str, label: &str) -> Option<&'a QueueFile> {
+    queues.iter().find(|q| {
+        let stem = Path::new(&q.name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        stem.eq_ignore_ascii_case(name)
+            || stem.eq_ignore_ascii_case(label)
+            || q.name.eq_ignore_ascii_case(label)
+    })
 }
 
 /// Seconds since the Unix epoch (0 if the clock is before it).

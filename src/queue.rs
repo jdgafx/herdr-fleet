@@ -15,28 +15,58 @@ use crate::parser::truncate;
 pub struct QueueFile {
     pub name: String,
     pub path: String,
+    /// Open items, blocked ones included.
     pub open: usize,
     pub done: usize,
+    /// Open items carrying a `| blocked <reason>` field (queue.py's marker).
+    pub blocked: usize,
+    /// The first open item that is not blocked.
     pub first_open: Option<String>,
 }
 
-/// Count `- [ ]` (open) and `- [x]` (done) items, and capture the first open one.
-pub fn count_checklist(text: &str) -> (usize, usize, Option<String>) {
-    let mut open = 0;
-    let mut done = 0;
-    let mut first = None;
+/// The counts for one checklist.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Checklist {
+    pub open: usize,
+    pub done: usize,
+    pub blocked: usize,
+    pub first_open: Option<String>,
+}
+
+/// True when an item line carries the queue.py `| blocked <reason>` field.
+pub fn is_blocked(line: &str) -> bool {
+    line.contains(" | blocked ")
+}
+
+/// Count `- [ ]` (open) and `- [x]` (done) items; `first_open` is the first open item
+/// that is not blocked.
+pub fn checklist(text: &str) -> Checklist {
+    let mut c = Checklist::default();
     for line in text.lines() {
         let t = line.trim_start();
         if let Some(rest) = t.strip_prefix("- [ ]") {
-            open += 1;
-            if first.is_none() {
-                first = Some(truncate(rest, 80));
+            c.open += 1;
+            if is_blocked(t) {
+                c.blocked += 1;
+            } else if c.first_open.is_none() {
+                c.first_open = Some(truncate(rest, 80));
             }
         } else if t.starts_with("- [x]") || t.starts_with("- [X]") {
-            done += 1;
+            c.done += 1;
         }
     }
-    (open, done, first)
+    c
+}
+
+/// Count `- [ ]` (open) and `- [x]` (done) items, and capture the first open unblocked one.
+pub fn count_checklist(text: &str) -> (usize, usize, Option<String>) {
+    let c = checklist(text);
+    (c.open, c.done, c.first_open)
+}
+
+/// True for a file that is not a work queue: the README and loop prompts.
+pub fn is_queue_name(name: &str) -> bool {
+    !name.eq_ignore_ascii_case("README.md") && !name.contains("prompt")
 }
 
 /// Summarise every `*.md` file directly inside `dir`, most-open first.
@@ -53,17 +83,23 @@ pub fn scan_queue_dir(dir: &Path) -> Vec<QueueFile> {
         let Ok(text) = fs::read_to_string(&path) else {
             continue;
         };
-        let (open, done, first_open) = count_checklist(&text);
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string();
+        let c = checklist(&text);
+        // Only real work queues: a file with no checklist items is not one.
+        if !is_queue_name(&name) || c.open + c.done == 0 {
+            continue;
+        }
         out.push(QueueFile {
-            name: path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("?")
-                .to_string(),
+            name,
             path: path.display().to_string(),
-            open,
-            done,
-            first_open,
+            open: c.open,
+            done: c.done,
+            blocked: c.blocked,
+            first_open: c.first_open,
         });
     }
     out.sort_by(|a, b| b.open.cmp(&a.open).then_with(|| a.name.cmp(&b.name)));

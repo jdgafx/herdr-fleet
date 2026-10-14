@@ -19,7 +19,7 @@ use throbber_widgets_tui::{symbols, Throbber, ThrobberState};
 use tui_big_text::{BigText, PixelSize};
 
 use crate::herdr::Herdr;
-use crate::model::{AgentRow, Fleet, Options};
+use crate::model::{is_stalled, AgentRow, Fleet, Options};
 use crate::parser::truncate;
 use crate::price;
 use crate::theme::{Theme, ThemeName};
@@ -181,11 +181,9 @@ impl App {
             if a.status == "blocked" {
                 current.push((a.pane_id.clone(), "blocked".into()));
             }
-            if a.status == "working" {
-                if let Some((_, t)) = self.since.get(&a.pane_id) {
-                    if t.elapsed() >= self.stall {
-                        current.push((a.pane_id.clone(), "stalled".into()));
-                    }
+            if let Some((_, t)) = self.since.get(&a.pane_id) {
+                if self.is_stalled_row(a, t.elapsed()) {
+                    current.push((a.pane_id.clone(), "stalled".into()));
                 }
             }
             if a.flags.iter().any(|f| f.starts_with("loop")) {
@@ -374,17 +372,26 @@ impl App {
         )
     }
 
+    /// Stalled per the rule in `model::is_stalled`, with the pane's transcript age.
+    fn is_stalled_row(&self, a: &AgentRow, in_state: Duration) -> bool {
+        is_stalled(
+            &a.status,
+            in_state,
+            self.stall,
+            a.transcript_quiet_secs.map(Duration::from_secs),
+            self.options.quiet,
+        )
+    }
+
     /// The state column: time in the state, with a spinner while the pane is working.
     fn state_line(&self, a: &AgentRow) -> Line<'static> {
         let elapsed = self.since.get(&a.pane_id).map(|(_, t)| t.elapsed());
         let mut text = elapsed.map(fmt_duration).unwrap_or_else(|| "-".into());
         let mut color = self.theme.muted;
-        if a.status == "working" {
-            if let Some(e) = elapsed {
-                if e >= self.stall {
-                    color = self.theme.alarm;
-                    text.push('!');
-                }
+        if let Some(e) = elapsed {
+            if self.is_stalled_row(a, e) {
+                color = self.theme.alarm;
+                text.push('!');
             }
         }
         let mut spans = Vec::new();
@@ -647,6 +654,8 @@ impl App {
                 }) || a.status == "blocked"
                 {
                     self.theme.alarm
+                } else if a.flags.iter().any(|f| f.starts_with("waiting")) {
+                    self.theme.warn
                 } else {
                     self.theme.muted
                 };
@@ -726,6 +735,16 @@ impl App {
                 } else {
                     self.theme.muted
                 };
+                let blocked = if q.blocked > 0 {
+                    Span::styled(
+                        format!(" blocked {:<2}", q.blocked),
+                        Style::default()
+                            .fg(self.theme.alarm)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    Span::raw(" ".repeat(12))
+                };
                 Line::from(vec![
                     Span::styled(
                         format!("{:<24}", truncate(&q.name, 24)),
@@ -736,9 +755,11 @@ impl App {
                         Style::default().fg(open_color),
                     ),
                     Span::styled(
-                        format!(" done {:<3}  ", q.done),
+                        format!(" done {:<3} ", q.done),
                         Style::default().fg(self.theme.muted),
                     ),
+                    blocked,
+                    Span::raw("  "),
                     Span::styled(
                         truncate(q.first_open.as_deref().unwrap_or(""), 52),
                         Style::default().fg(self.theme.text),

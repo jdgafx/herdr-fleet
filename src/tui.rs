@@ -6,19 +6,36 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use ratatui::backend::CrosstermBackend;
+use ratatui::backend::{CrosstermBackend, TestBackend};
+use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState};
 use ratatui::{Frame, Terminal};
+use tachyonfx::{fx, Effect, Interpolation};
+use throbber_widgets_tui::{symbols, Throbber, ThrobberState};
+use tui_big_text::{BigText, PixelSize};
 
 use crate::herdr::Herdr;
 use crate::model::{AgentRow, Fleet, Options};
 use crate::parser::truncate;
 use crate::price;
+use crate::theme::{Theme, ThemeName};
 use crate::transcript::{ToolCall, TranscriptTracker};
+
+/// How the dashboard looks: colour theme and whether the transition effects run.
+#[derive(Debug, Clone, Copy)]
+pub struct Look {
+    pub theme: ThemeName,
+    pub fx: bool,
+}
+
+/// From this terminal width the header shows the big fleet count.
+const WIDE: u16 = 100;
+/// Length of the fade on a row whose state changed.
+const FADE_MS: u32 = 450;
 
 /// The Space-key detail view: a snapshot taken when it opens.
 struct DetailView {
@@ -52,6 +69,16 @@ struct App {
     status: String,
     input: Option<String>,
     quit: bool,
+    theme: Theme,
+    fx: bool,
+    /// The spinner on working panes, advanced once per frame.
+    throbber: ThrobberState,
+    /// Transition effects still running on table rows.
+    effects: Vec<Effect>,
+    /// Panes whose status changed since the last frame; they fade at the next table draw.
+    fade_pending: Vec<String>,
+    prev_status: HashMap<String, String>,
+    last_draw: Instant,
 }
 
 impl App {
@@ -62,6 +89,7 @@ impl App {
         interval: Duration,
         stall: Duration,
         alerts: bool,
+        look: Look,
     ) -> Self {
         Self {
             herdr,
@@ -80,6 +108,13 @@ impl App {
             status: "starting…".into(),
             input: None,
             quit: false,
+            theme: Theme::named(look.theme),
+            fx: look.fx,
+            throbber: ThrobberState::default(),
+            effects: Vec::new(),
+            fade_pending: Vec::new(),
+            prev_status: HashMap::new(),
+            last_draw: Instant::now(),
         }
     }
 
@@ -101,6 +136,19 @@ impl App {
                 }
                 let live: Vec<String> = fleet.agents.iter().map(|a| a.pane_id.clone()).collect();
                 self.since.retain(|k, _| live.contains(k));
+                if self.fx {
+                    for a in &fleet.agents {
+                        let changed = self
+                            .prev_status
+                            .get(&a.pane_id)
+                            .is_some_and(|prev| *prev != a.status);
+                        if changed {
+                            self.fade_pending.push(a.pane_id.clone());
+                        }
+                        self.prev_status.insert(a.pane_id.clone(), a.status.clone());
+                    }
+                    self.prev_status.retain(|k, _| live.contains(k));
+                }
                 match self.table.selected() {
                     Some(i) if i < fleet.agents.len() => {}
                     _ => self.table.select(if fleet.agents.is_empty() {
@@ -308,33 +356,106 @@ impl App {
         }
     }
 
-    fn state_cell(&self, a: &AgentRow) -> (String, Color) {
-        let elapsed = self.since.get(&a.pane_id).map(|(_, t)| t.elapsed());
-        let mut text = elapsed.map(fmt_duration).unwrap_or_default();
-        let mut color = match a.status.as_str() {
-            "working" => Color::Yellow,
-            "blocked" => Color::Red,
-            "idle" => Color::Cyan,
-            "done" => Color::Green,
-            _ => Color::Gray,
+    /// The status as a coloured pill.
+    fn status_pill(&self, status: &str) -> Span<'static> {
+        let bg = match status {
+            "working" => self.theme.working,
+            "idle" => self.theme.idle,
+            "done" => self.theme.done,
+            "blocked" => self.theme.blocked,
+            _ => self.theme.muted,
         };
+        Span::styled(
+            format!(" {status} "),
+            Style::default()
+                .fg(self.theme.on_accent)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        )
+    }
+
+    /// The state column: time in the state, with a spinner while the pane is working.
+    fn state_line(&self, a: &AgentRow) -> Line<'static> {
+        let elapsed = self.since.get(&a.pane_id).map(|(_, t)| t.elapsed());
+        let mut text = elapsed.map(fmt_duration).unwrap_or_else(|| "-".into());
+        let mut color = self.theme.muted;
         if a.status == "working" {
             if let Some(e) = elapsed {
                 if e >= self.stall {
-                    color = Color::Red;
+                    color = self.theme.alarm;
                     text.push('!');
                 }
             }
         }
-        if text.is_empty() {
-            text.push('-');
+        let mut spans = Vec::new();
+        if a.status == "working" {
+            spans.push(
+                Throbber::default()
+                    .throbber_style(Style::default().fg(self.theme.working))
+                    .throbber_set(symbols::throbber::BRAILLE_SIX)
+                    .to_symbol_span(&self.throbber),
+            );
+            spans.push(Span::raw(" "));
         }
-        (text, color)
+        spans.push(Span::styled(text, Style::default().fg(color)));
+        Line::from(spans)
     }
 
-    /// Column widths sized to the data: NAME/MODEL/FLAGS get their content
-    /// width (clamped), and LAST OUTPUT takes what remains.
-    fn column_widths(&self) -> [Constraint; 10] {
+    /// Context as a five-cell gauge and the percentage; just the percentage when `bar` is off.
+    fn ctx_line(&self, percent: Option<u8>, bar: bool) -> Line<'static> {
+        let Some(c) = percent else {
+            return Line::from(Span::styled("-", Style::default().fg(self.theme.muted)));
+        };
+        if !bar {
+            let color = if c >= 80 { self.theme.alarm } else { self.theme.text };
+            return Line::from(Span::styled(format!("{c}%"), Style::default().fg(color)));
+        }
+        let filled = ((c as usize * 5 + 50) / 100).min(5);
+        let fill_color = if c >= 80 {
+            self.theme.alarm
+        } else if c >= 50 {
+            self.theme.warn
+        } else {
+            self.theme.done
+        };
+        Line::from(vec![
+            Span::styled("█".repeat(filled), Style::default().fg(fill_color)),
+            Span::styled(
+                "░".repeat(5 - filled),
+                Style::default().fg(self.theme.surface),
+            ),
+            Span::styled(
+                format!(" {c:>3}%"),
+                Style::default().fg(self.theme.text),
+            ),
+        ])
+    }
+
+    /// Cost as a five-cell gauge scaled to the fleet's highest spend, and the amount.
+    fn cost_line(&self, cost: Option<f64>, max: f64) -> Line<'static> {
+        let Some(c) = cost else {
+            return Line::from(Span::styled("-", Style::default().fg(self.theme.muted)));
+        };
+        let filled = if max > 0.0 {
+            ((c / max * 5.0).round() as usize).min(5)
+        } else {
+            0
+        };
+        Line::from(vec![
+            Span::styled("█".repeat(filled), Style::default().fg(self.theme.accent)),
+            Span::styled("░".repeat(5 - filled), Style::default().fg(self.theme.surface)),
+            Span::styled(
+                format!(" {}", price::fmt_usd(c)),
+                Style::default().fg(self.theme.text),
+            ),
+        ])
+    }
+
+    /// Column widths sized to the data: NAME/MODEL/FLAGS get their content width
+    /// (clamped, narrower below WIDE columns), and LAST OUTPUT takes what remains.
+    /// Below WIDE the COST column is left out, so the alarms and the output keep room.
+    fn column_widths(&self, wide: bool) -> (Vec<Constraint>, usize, usize, usize) {
+        let (name_max, model_max, flags_max) = if wide { (28, 18, 30) } else { (9, 9, 6) };
         let name = self
             .fleet
             .agents
@@ -342,7 +463,7 @@ impl App {
             .map(|a| a.name.chars().count())
             .max()
             .unwrap_or(4)
-            .clamp(4, 28) as u16;
+            .clamp(4, name_max);
         let model = self
             .fleet
             .agents
@@ -350,7 +471,7 @@ impl App {
             .map(|a| a.model.as_deref().map(|m| m.chars().count()).unwrap_or(0))
             .max()
             .unwrap_or(5)
-            .clamp(5, 18) as u16;
+            .clamp(5, model_max);
         let flags = self
             .fleet
             .agents
@@ -358,27 +479,37 @@ impl App {
             .map(|a| a.flags.join("; ").chars().count())
             .max()
             .unwrap_or(5)
-            .clamp(5, 30) as u16;
-        [
+            .clamp(5, flags_max);
+        let mut widths = vec![
             Constraint::Length(1),
-            Constraint::Length(8),
-            Constraint::Length(name),
-            Constraint::Length(8),
-            Constraint::Length(model),
-            Constraint::Length(4),
-            Constraint::Length(7),
-            Constraint::Length(8),
-            Constraint::Length(flags),
-            Constraint::Min(16),
-        ]
+            Constraint::Length(6),
+            Constraint::Length(name as u16),
+            Constraint::Length(9),
+            Constraint::Length(model as u16),
+            Constraint::Length(if wide { 10 } else { 4 }),
+        ];
+        if wide {
+            widths.push(Constraint::Length(12));
+        }
+        widths.push(Constraint::Length(8));
+        widths.push(Constraint::Length(flags as u16));
+        widths.push(Constraint::Min(if wide { 16 } else { 8 }));
+        (widths, name, model, flags)
     }
 
     fn render(&mut self, f: &mut Frame) {
+        let now = Instant::now();
+        let dt = now.saturating_duration_since(self.last_draw);
+        self.last_draw = now;
+        self.throbber.calc_next();
+
         // Size the fleet and queue blocks to their content, so neither leaves
         // a big empty box; the filler between them absorbs the slack.
+        let wide = f.area().width >= WIDE;
         let has_queues = self.queue_dir.is_some() && !self.fleet.queues.is_empty();
         let table_h = (self.fleet.agents.len() as u16 + 3).clamp(4, 30);
-        let mut constraints = vec![Constraint::Length(4), Constraint::Length(table_h)];
+        let header_h = if wide { 6 } else { 4 };
+        let mut constraints = vec![Constraint::Length(header_h), Constraint::Length(table_h)];
         if has_queues {
             constraints.push(Constraint::Length(
                 (self.fleet.queues.len() as u16 + 2).clamp(3, 12),
@@ -393,7 +524,7 @@ impl App {
             .split(f.area());
 
         let mut i = 0;
-        self.render_header(f, rows[i]);
+        self.render_header(f, rows[i], wide);
         i += 1;
         self.render_table(f, rows[i]);
         i += 1;
@@ -403,6 +534,15 @@ impl App {
         }
         i += 1; // filler
         self.render_footer(f, rows[i]);
+
+        // Effects act on the cells already drawn: the table rows that changed state.
+        let frame_area = f.area();
+        let buf = f.buffer_mut();
+        for effect in self.effects.iter_mut() {
+            effect.process(dt.into(), buf, frame_area);
+        }
+        self.effects.retain(|e| e.running());
+
         if let Some(buf) = self.input.clone() {
             self.render_input(f, f.area(), &buf);
         }
@@ -411,112 +551,167 @@ impl App {
         }
     }
 
-    fn render_header(&self, f: &mut Frame, area: Rect) {
+    /// The status text: the full line when there is room, a shorter one when not.
+    fn header_status(&self, wide: bool) -> String {
+        if wide || self.status.starts_with("error") || self.fleet.herdr_version.is_empty() {
+            return self.status.clone();
+        }
+        format!(
+            "{} agents · {} queues · ~{} est spend",
+            self.fleet.agents.len(),
+            self.fleet.queues.len(),
+            price::fmt_usd(self.fleet.total_cost_usd)
+        )
+    }
+
+    fn render_header(&self, f: &mut Frame, area: Rect, wide: bool) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.theme.border));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
         let age = self.last_fetch.elapsed().as_secs();
         let title = Line::from(vec![
             Span::styled(
                 " herdr-fleet ",
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
+                    .fg(self.theme.on_accent)
+                    .bg(self.theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!("  {}", self.status)),
+            Span::styled(
+                format!("  {}", self.header_status(wide)),
+                Style::default().fg(self.theme.text),
+            ),
         ]);
         let legend = Line::from(vec![
+            self.status_pill("working"),
+            Span::raw(" "),
+            self.status_pill("idle"),
+            Span::raw(" "),
+            self.status_pill("done"),
+            Span::raw(" "),
+            self.status_pill("blocked"),
             Span::styled(
-                format!("  refreshed {age}s ago   "),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled("working", Style::default().fg(Color::Yellow)),
-            Span::raw(" "),
-            Span::styled("idle", Style::default().fg(Color::Cyan)),
-            Span::raw(" "),
-            Span::styled("done", Style::default().fg(Color::Green)),
-            Span::raw(" "),
-            Span::styled("stall/loop/dialog", Style::default().fg(Color::Red)),
-            Span::styled(
-                "   IN STATE: observed since launch",
-                Style::default().fg(Color::DarkGray),
+                format!("   refreshed {age}s ago   IN STATE: observed since launch"),
+                Style::default().fg(self.theme.muted),
             ),
         ]);
-        f.render_widget(
-            Paragraph::new(vec![title, legend]).block(Block::default().borders(Borders::ALL)),
-            area,
-        );
+        let info = Paragraph::new(vec![title, legend]);
+
+        if wide {
+            let [count_area, info_area] =
+                Layout::horizontal([Constraint::Length(20), Constraint::Min(0)]).areas(inner);
+            let count = BigText::builder()
+                .pixel_size(PixelSize::Quadrant)
+                .style(Style::default().fg(self.theme.accent))
+                .lines(vec![self.fleet.agents.len().to_string().into()])
+                .build();
+            f.render_widget(count, count_area);
+            f.render_widget(info, info_area);
+        } else {
+            f.render_widget(info, inner);
+        }
     }
 
     fn render_table(&mut self, f: &mut Frame, area: Rect) {
-        let header = Row::new(vec![
-            "",
-            "PANE",
-            "NAME",
-            "STATUS",
-            "MODEL",
-            "CTX",
-            "COST",
-            "IN STATE",
-            "FLAGS",
-            "LAST OUTPUT",
-        ])
-        .style(
+        let wide = area.width >= WIDE;
+        let mut heads = vec!["", "PANE", "NAME", "STATUS", "MODEL", "CTX"];
+        if wide {
+            heads.push("COST");
+        }
+        heads.extend(["IN STATE", "FLAGS", "LAST OUTPUT"]);
+        let header = Row::new(heads).style(
             Style::default()
-                .fg(Color::Gray)
+                .fg(self.theme.muted)
                 .add_modifier(Modifier::BOLD),
         );
 
-        let widths = self.column_widths();
-        let name_w = match widths[2] {
-            Constraint::Length(w) => w as usize,
-            _ => 20,
-        };
-        let model_w = match widths[4] {
-            Constraint::Length(w) => w as usize,
-            _ => 12,
-        };
-        let flags_w = match widths[8] {
-            Constraint::Length(w) => w as usize,
-            _ => 20,
-        };
+        let (widths, name_w, model_w, flags_w) = self.column_widths(wide);
+        let max_cost = self
+            .fleet
+            .agents
+            .iter()
+            .filter_map(|a| a.cost_usd)
+            .fold(0.0_f64, f64::max);
 
         let rows: Vec<Row> = self
             .fleet
             .agents
             .iter()
             .map(|a| {
-                let (state, color) = self.state_cell(a);
-                let ctx_cell = match a.ctx_percent {
-                    Some(c) if c >= 80 => Cell::from(format!("{c}%"))
-                        .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-                    Some(c) if c >= 50 => {
-                        Cell::from(format!("{c}%")).style(Style::default().fg(Color::Yellow))
-                    }
-                    Some(c) => Cell::from(format!("{c}%")),
-                    None => Cell::from("-"),
+                let flags = a.flags.join("; ");
+                let flag_color = if a.flags.iter().any(|f| {
+                    f.starts_with("drift") || f.starts_with("dialog") || f.starts_with("loop")
+                }) || a.status == "blocked"
+                {
+                    self.theme.alarm
+                } else {
+                    self.theme.muted
                 };
-                Row::new(vec![
-                    Cell::from(if a.focused { "●" } else { " " }),
+                let mut cells = vec![
+                    Cell::from(Span::styled(
+                        if a.focused { "●" } else { " " },
+                        Style::default().fg(self.theme.accent),
+                    )),
                     Cell::from(a.pane_id.clone()),
                     Cell::from(truncate(&a.name, name_w)),
-                    Cell::from(a.status.clone()),
+                    Cell::from(self.status_pill(&a.status)),
                     Cell::from(truncate(a.model.as_deref().unwrap_or("-"), model_w)),
-                    ctx_cell,
-                    Cell::from(a.cost_usd.map(price::fmt_usd).unwrap_or_else(|| "-".into())),
-                    Cell::from(state),
-                    Cell::from(truncate(&a.flags.join("; "), flags_w)),
-                    Cell::from(truncate(&a.last_line, 60)),
-                ])
-                .style(Style::default().fg(color))
+                    Cell::from(self.ctx_line(a.ctx_percent, wide)),
+                ];
+                if wide {
+                    cells.push(Cell::from(self.cost_line(a.cost_usd, max_cost)));
+                }
+                cells.push(Cell::from(self.state_line(a)));
+                cells.push(Cell::from(Span::styled(
+                    truncate(&flags, flags_w),
+                    Style::default().fg(flag_color),
+                )));
+                cells.push(Cell::from(truncate(&a.last_line, 60)));
+                Row::new(cells)
             })
             .collect();
 
         let table = Table::new(rows, widths)
             .header(header)
-            .block(Block::default().borders(Borders::ALL).title(" fleet "))
-            .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.theme.border))
+                    .title(" fleet "),
+            )
+            .row_highlight_style(
+                Style::default()
+                    .fg(self.theme.text)
+                    .add_modifier(Modifier::BOLD),
+            )
             .highlight_symbol("▶ ")
             .column_spacing(1);
         f.render_stateful_widget(table, area, &mut self.table);
+
+        // Row i sits under the border and the header row: start the fade for changed rows.
+        for (i, a) in self.fleet.agents.iter().enumerate() {
+            if let Some(pos) = self.fade_pending.iter().position(|p| *p == a.pane_id) {
+                self.fade_pending.remove(pos);
+                let row = Rect {
+                    x: area.x + 1,
+                    y: area.y + 2 + i as u16,
+                    width: area.width.saturating_sub(2),
+                    height: 1,
+                };
+                if row.y < area.y + area.height.saturating_sub(1) {
+                    let fade = fx::fade_from_fg(
+                        self.theme.accent,
+                        (FADE_MS, Interpolation::QuadOut),
+                    )
+                    .with_area(row);
+                    self.effects.push(fade);
+                }
+            }
+        }
+        self.fade_pending.clear();
     }
 
     fn render_queues(&self, f: &mut Frame, area: Rect) {
@@ -527,14 +722,14 @@ impl App {
             .iter()
             .map(|q| {
                 let open_color = if q.open > 0 {
-                    Color::Yellow
+                    self.theme.warn
                 } else {
-                    Color::DarkGray
+                    self.theme.muted
                 };
                 Line::from(vec![
                     Span::styled(
                         format!("{:<24}", truncate(&q.name, 24)),
-                        Style::default().fg(Color::White),
+                        Style::default().fg(self.theme.text),
                     ),
                     Span::styled(
                         format!(" open {:<3}", q.open),
@@ -542,28 +737,36 @@ impl App {
                     ),
                     Span::styled(
                         format!(" done {:<3}  ", q.done),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(self.theme.muted),
                     ),
                     Span::styled(
                         truncate(q.first_open.as_deref().unwrap_or(""), 52),
-                        Style::default().fg(Color::Gray),
+                        Style::default().fg(self.theme.text),
                     ),
                 ])
             })
             .collect();
         f.render_widget(
-            Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" queues ")),
+            Paragraph::new(lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.theme.border))
+                    .title(" queues "),
+            ),
             area,
         );
     }
 
     fn render_footer(&self, f: &mut Frame, area: Rect) {
-        let hints =
-            " q quit  ·  r refresh  ·  ↑/k ↓/j move  ·  ⏎ focus pane  ·  space detail  ·  i send prompt ";
+        let hints = if area.width >= WIDE {
+            " q quit  ·  r refresh  ·  ↑/k ↓/j move  ·  ⏎ focus pane  ·  space detail  ·  i send prompt "
+        } else {
+            " q quit · r refresh · ↑↓ move · ⏎ focus · space detail · i prompt"
+        };
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 hints,
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(self.theme.muted),
             ))),
             area,
         );
@@ -575,14 +778,15 @@ impl App {
         let rect = centered(area, width, 3);
         f.render_widget(Clear, rect);
         let line = Line::from(vec![
-            Span::styled("› ", Style::default().fg(Color::Cyan)),
-            Span::raw(buf.to_string()),
-            Span::styled("█", Style::default().fg(Color::Cyan)),
+            Span::styled("› ", Style::default().fg(self.theme.accent)),
+            Span::styled(buf.to_string(), Style::default().fg(self.theme.text)),
+            Span::styled("█", Style::default().fg(self.theme.accent)),
         ]);
         f.render_widget(
             Paragraph::new(line).block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.theme.accent))
                     .title(format!(" send prompt to {pane} ")),
             ),
             rect,
@@ -600,39 +804,38 @@ impl App {
         );
         f.render_widget(Clear, rect);
         let inner = rect.width.saturating_sub(2) as usize;
+        let muted = Style::default().fg(self.theme.muted);
         let mut lines: Vec<Line> = Vec::new();
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" {} ", d.pane_id),
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(self.theme.on_accent)
+                    .bg(self.theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(truncate(
-                &format!(
-                    "{}  ·  {}  ·  {}  ·  ctx {}  ·  ~{} est",
-                    d.name, d.status, d.model, d.ctx, d.cost
+            Span::styled(
+                truncate(
+                    &format!(
+                        "  {}  ·  {}  ·  {}  ·  ctx {}  ·  ~{} est",
+                        d.name, d.status, d.model, d.ctx, d.cost
+                    ),
+                    inner.saturating_sub(9),
                 ),
-                inner.saturating_sub(9),
-            )),
+                Style::default().fg(self.theme.text),
+            ),
         ]));
         match &d.queue {
             Some((name, item)) => lines.push(Line::from(vec![
-                Span::styled("queue   ", Style::default().fg(Color::DarkGray)),
-                Span::raw(truncate(
-                    &format!("{name}: {item}"),
-                    inner.saturating_sub(8),
-                )),
+                Span::styled("queue   ", muted),
+                Span::styled(
+                    truncate(&format!("{name}: {item}"), inner.saturating_sub(8)),
+                    Style::default().fg(self.theme.text),
+                ),
             ])),
-            None => lines.push(Line::from(Span::styled(
-                "queue   —",
-                Style::default().fg(Color::DarkGray),
-            ))),
+            None => lines.push(Line::from(Span::styled("queue   —", muted))),
         }
-        lines.push(Line::from(Span::styled(
-            "last tool calls",
-            Style::default().fg(Color::DarkGray),
-        )));
+        lines.push(Line::from(Span::styled("last tool calls", muted)));
         if d.tools.is_empty() {
             lines.push(Line::from("  —"));
         }
@@ -642,10 +845,7 @@ impl App {
                 inner,
             )));
         }
-        lines.push(Line::from(Span::styled(
-            "output (last 30 lines)",
-            Style::default().fg(Color::DarkGray),
-        )));
+        lines.push(Line::from(Span::styled("output (last 30 lines)", muted)));
         for l in &d.output {
             lines.push(Line::from(truncate(l, inner)));
         }
@@ -653,6 +853,7 @@ impl App {
             Paragraph::new(lines).block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.theme.accent))
                     .title(" pane detail — space/esc closes "),
             ),
             rect,
@@ -687,6 +888,7 @@ pub fn run(
     interval_secs: u64,
     stall_secs: u64,
     alerts: bool,
+    look: Look,
 ) -> Result<()> {
     // Record our own pane once, so `herdr-fleet back` can find it later.
     let _ = crate::keys::record_fleet_pane(&herdr);
@@ -698,11 +900,36 @@ pub fn run(
         Duration::from_secs(interval_secs.max(1)),
         Duration::from_secs(stall_secs.max(1)),
         alerts,
+        look,
     );
     app.refresh();
     let result = app.main_loop(&mut terminal);
     ratatui::restore();
     result
+}
+
+/// Render one frame at the given size, without a terminal. Used for snapshots and tests.
+pub fn snapshot(
+    herdr: Herdr,
+    queue_dir: Option<PathBuf>,
+    options: Options,
+    look: Look,
+    width: u16,
+    height: u16,
+) -> Result<Buffer> {
+    let mut app = App::new(
+        herdr,
+        queue_dir,
+        options,
+        Duration::from_secs(2),
+        Duration::from_secs(900),
+        false,
+        look,
+    );
+    app.refresh();
+    let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+    terminal.draw(|f| app.render(f))?;
+    Ok(terminal.backend().buffer().clone())
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -750,5 +977,29 @@ mod unit {
         let r = centered(area, 90, 3);
         assert_eq!(r.width, 40);
         assert_eq!(r.height, 3);
+    }
+
+    /// Renders with no herdr reachable (an empty fleet) at both required widths and
+    /// checks the title and the footer hints are on screen, with no panic.
+    #[test]
+    fn renders_at_80_and_160_columns() {
+        for width in [80u16, 160] {
+            let look = Look {
+                theme: ThemeName::Mocha,
+                fx: true,
+            };
+            let buf = snapshot(
+                Herdr::new("/nonexistent/herdr"),
+                None,
+                Options::default(),
+                look,
+                width,
+                30,
+            )
+            .unwrap();
+            let text: String = buf.content.iter().map(|c| c.symbol()).collect();
+            assert!(text.contains("herdr-fleet"), "width {width}");
+            assert!(text.contains("quit"), "width {width}");
+        }
     }
 }

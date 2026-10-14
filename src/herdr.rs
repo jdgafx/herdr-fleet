@@ -145,6 +145,32 @@ impl Herdr {
         None
     }
 
+    /// The foreground processes of a pane as (pid, argv), for the drift check.
+    pub fn foreground_processes(&self, pane: &str) -> Vec<(u32, Vec<String>)> {
+        let Ok(value) = self.json(&["pane", "process-info", "--pane", pane]) else {
+            return Vec::new();
+        };
+        let Some(procs) = value
+            .pointer("/result/process_info/foreground_processes")
+            .and_then(Value::as_array)
+        else {
+            return Vec::new();
+        };
+        procs
+            .iter()
+            .filter_map(|p| {
+                let pid = u32::try_from(p.get("pid")?.as_u64()?).ok()?;
+                let argv = p
+                    .get("argv")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(|a| a.as_str().map(str::to_string))
+                    .collect();
+                Some((pid, argv))
+            })
+            .collect()
+    }
+
     /// The last `lines` lines of a pane's terminal output, as plain text.
     pub fn read_tail(&self, pane: &str, lines: u32) -> Result<String> {
         self.run(&[

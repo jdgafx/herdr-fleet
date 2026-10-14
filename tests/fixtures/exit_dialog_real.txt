@@ -1,0 +1,8 @@
+   Background work is running
+   The following will stop when you exit:
+
+   subagent · example web search
+
+   ❯ 1. Exit and stop tasks
+     2. Move to background and exit
+     3. Stay

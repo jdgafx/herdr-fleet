@@ -10,6 +10,7 @@ use crate::herdr::Herdr;
 use crate::parser::{self, truncate};
 use crate::price;
 use crate::queue::{scan_queue_dir, QueueFile};
+use crate::roster::{self, Roster};
 use crate::transcript::{self, TranscriptTracker};
 
 /// How the row's detail columns were filled.
@@ -27,6 +28,8 @@ pub struct Options {
     pub projects_dir: PathBuf,
     /// Tokens in the model's context window, for the ctx % column.
     pub context_window: u64,
+    /// The roster, when one is loaded; its panes get a `drift` flag when they differ.
+    pub roster: Option<Roster>,
 }
 
 impl Default for Options {
@@ -34,6 +37,7 @@ impl Default for Options {
         Self {
             projects_dir: transcript::default_projects_dir(),
             context_window: 1_000_000,
+            roster: None,
         }
     }
 }
@@ -273,10 +277,22 @@ impl Fleet {
     ) -> Result<Fleet> {
         let herdr_version = herdr.version();
         let infos = herdr.agents()?;
-        let agents: Vec<AgentRow> = infos
+        let mut agents: Vec<AgentRow> = infos
             .iter()
             .map(|info| AgentRow::from_info(herdr, info, options, tracker))
             .collect();
+        if let Some(roster) = &options.roster {
+            for row in agents.iter_mut() {
+                let Some(entry) = roster.find(&row.pane_id) else {
+                    continue;
+                };
+                let live = roster::live_launch(herdr, &row.pane_id);
+                let drift = roster::drift(entry, live.as_ref());
+                if !drift.is_empty() {
+                    row.flags.push(format!("drift: {}", truncate(&drift.join(", "), 60)));
+                }
+            }
+        }
         let live: Vec<PathBuf> = agents
             .iter()
             .filter_map(|a| a.transcript_path.clone())

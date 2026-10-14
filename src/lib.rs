@@ -17,5 +17,8 @@ pub mod model;
 pub mod parser;
 pub mod price;
 pub mod queue;
+pub mod relaunch;
+pub mod roster;
+pub mod theme;
 pub mod transcript;
 pub mod tui;

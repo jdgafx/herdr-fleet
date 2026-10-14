@@ -1,0 +1,193 @@
+//! Exit-dialog parsing and the relaunch plan. Dialog text here is synthetic:
+//! the real dialog wording has not been captured yet (see the live proof).
+
+use herdr_fleet::relaunch::{is_leftover, parse_exit_dialog, plan_steps, ExitDialog};
+use herdr_fleet::roster::{Entry, Roster};
+
+const LEFTOVERS: &str = "\
+Background work is running
+  - sleep 3600 holder
+  - poller (finished)
+  1. Exit and stop tasks
+  2. Keep running
+";
+
+const LIVE: &str = "\
+│ Background work is running                 │
+│ - npm run dev (still serving)              │
+│ 1. Exit and stop tasks                     │
+│ 2. Keep running                            │
+";
+
+#[test]
+fn leftovers_only_chooses_the_exit_option() {
+    match parse_exit_dialog(LEFTOVERS) {
+        Some(ExitDialog::Leftovers { tasks, key }) => {
+            assert_eq!(key, "1");
+            assert_eq!(tasks.len(), 2);
+        }
+        other => panic!("expected leftovers, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_live_task_stops_the_relaunch() {
+    match parse_exit_dialog(LIVE) {
+        Some(ExitDialog::Live { tasks }) => assert_eq!(tasks, vec!["npm run dev (still serving)"]),
+        other => panic!("expected live, got {other:?}"),
+    }
+}
+
+#[test]
+fn no_dialog_means_none() {
+    assert_eq!(parse_exit_dialog("plain pane output\n> prompt"), None);
+}
+
+#[test]
+fn a_dialog_without_the_exit_option_is_not_acted_on() {
+    let text = "Background work is running\n  - sleep 60 holder\n  2. Keep running\n";
+    assert!(matches!(parse_exit_dialog(text), Some(ExitDialog::Live { .. })));
+}
+
+#[test]
+fn leftover_classification() {
+    assert!(is_leftover("sleep 3600 holder"));
+    assert!(is_leftover("poller (finished)"));
+    // live work that merely contains the words must never count as a leftover
+    assert!(!is_leftover("while true; do build; sleep 60; done"));
+    assert!(!is_leftover("python worker.py --sleep-interval 5"));
+    assert!(!is_leftover("polling db, 3 done"));
+    assert!(!is_leftover("npm run dev"));
+}
+
+#[test]
+fn one_live_task_among_leftovers_stops_the_relaunch() {
+    let text = "Background work is running\n  - sleep 60 holder\n  - npm run dev\n  1. Exit and stop tasks\n  2. Keep running\n";
+    assert!(matches!(parse_exit_dialog(text), Some(ExitDialog::Live { .. })));
+}
+
+#[test]
+fn a_numbered_live_task_is_not_taken_for_an_option() {
+    let text = "Background work is running\n  - sleep 60 holder\n  1. sleep 5; ./run.sh\n  1. Exit and stop tasks\n  2. Keep running\n";
+    match parse_exit_dialog(text) {
+        Some(ExitDialog::Live { tasks }) => assert!(tasks.contains(&"1. sleep 5; ./run.sh".to_string())),
+        other => panic!("expected live, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_task_that_starts_with_an_option_label_stays_a_task() {
+    let text = "Background work is running\n  - sleep 60 holder\n  1. Cancel nightly job; ./run.sh\n  1. Exit and stop tasks\n  2. Keep running\n";
+    match parse_exit_dialog(text) {
+        Some(ExitDialog::Live { tasks }) => assert!(tasks.contains(&"1. Cancel nightly job; ./run.sh".to_string())),
+        other => panic!("expected live, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_newest_dialog_is_the_one_read() {
+    let text = "Background work is running\n  - npm run dev\n  1. Exit and stop tasks\n  2. Keep running\n$ prompt\nBackground work is running\n  - sleep 60 holder\n  1. Exit and stop tasks\n  2. Keep running\n";
+    assert!(matches!(parse_exit_dialog(text), Some(ExitDialog::Leftovers { .. })));
+}
+
+#[test]
+fn a_paused_pane_is_refused_before_any_herdr_call() {
+    let (roster, _) = Roster::import("- w1C:p4 disputes claude --model sonnet --effort high ~/x PAUSED").unwrap();
+    let herdr = herdr_fleet::herdr::Herdr::new("/nonexistent/herdr");
+    let err = herdr_fleet::relaunch::relaunch(&herdr, &roster, "w1C:p4", false).unwrap_err();
+    assert!(err.to_string().contains("paused"), "{err}");
+}
+
+#[test]
+fn plan_for_a_running_worker_starts_with_exit_and_ends_with_work() {
+    let (roster, _) = Roster::import(
+        "- w1F:p1 housekeeping env -u A claude --model haiku --effort medium ~",
+    )
+    .unwrap();
+    let entry = roster.find("w1F:p1").unwrap();
+    let steps = plan_steps(entry, true);
+    assert_eq!(steps.first().unwrap(), "herdr agent prompt w1F:p1 /exit");
+    assert!(steps.iter().any(|s| s.starts_with("herdr pane run w1F:p1 ")));
+    assert!(steps.last().unwrap().contains("no resend"), "the plan ends with the confirm-or-report step");
+    assert!(steps.contains(&"herdr agent prompt w1F:p1 '/work housekeeping'".to_string()));
+}
+
+#[test]
+fn plan_for_an_empty_pane_skips_the_exit() {
+    let (roster, _) = Roster::import("- w1F:p1 housekeeping claude --model haiku ~").unwrap();
+    let steps = plan_steps(roster.find("w1F:p1").unwrap(), false);
+    assert!(!steps.iter().any(|s| s.contains("/exit")));
+    assert!(steps[0].starts_with("herdr pane run w1F:p1 "));
+}
+
+/// The exit dialog as Claude Code really shows it (captured 2026-10-13; task text generalised).
+const REAL_DIALOG: &str = include_str!("fixtures/exit_dialog_real.txt");
+
+#[test]
+fn the_real_dialog_lists_only_its_task_not_the_intro_or_options() {
+    match parse_exit_dialog(REAL_DIALOG) {
+        Some(ExitDialog::Live { tasks }) => {
+            assert_eq!(tasks, vec!["subagent · example web search"]);
+        }
+        other => panic!("a running subagent is live work, got {other:?}"),
+    }
+}
+
+#[test]
+fn live_tasks_that_contain_hint_words_are_never_dropped() {
+    for task in [
+        "enterprise-sync --watch",
+        "job-to-cancel.sh",
+        "The following will stop when you exit: npm run dev",
+    ] {
+        let text = format!(
+            "Background work is running\n  - sleep 60 holder\n  - {task}\n  1. Exit and stop tasks\n  2. Keep running\n"
+        );
+        match parse_exit_dialog(&text) {
+            Some(ExitDialog::Live { tasks }) => assert!(tasks.contains(&task.to_string()), "{task}: {tasks:?}"),
+            other => panic!("{task}: a live task must stop the relaunch, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn the_real_layout_with_only_leftovers_chooses_option_one() {
+    let leftovers = REAL_DIALOG.replace("subagent · example web search", "sleep 3600 holder");
+    match parse_exit_dialog(&leftovers) {
+        Some(ExitDialog::Leftovers { tasks, key }) => {
+            assert_eq!(key, "1");
+            assert_eq!(tasks, vec!["sleep 3600 holder"]);
+        }
+        other => panic!("expected leftovers on the real layout, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_plan_waits_for_the_input_box_before_sending_work() {
+    let entry = Entry { pane: "w1F:p1".into(), queue: "housekeeping".into(), command: "claude".into(), ..Entry::default() };
+    let steps = plan_steps(&entry, false);
+    let box_at = steps.iter().position(|s| s.contains("input box")).expect("input-box wait");
+    let work_at = steps.iter().position(|s| s.contains("/work ")).expect("/work send");
+    assert!(box_at < work_at, "the input box must be waited for before /work: {steps:?}");
+    assert!(steps.iter().any(|s| s.contains("no resend")), "a send that does not start is reported, never repeated");
+}
+
+#[test]
+fn input_box_is_read_from_the_last_prompt_line() {
+    use herdr_fleet::relaunch::input_line;
+    let banner_only = "Claude Code v2\n  Haiku 5.5 with medium effort\n";
+    assert_eq!(input_line(banner_only), None);
+    let idle = "────\n❯ \n────\n  ~ | Haiku 5.5\n";
+    assert_eq!(input_line(idle).map(str::trim), Some(""));
+    let pending = "────\n❯ /work housekeeping\n────\n";
+    assert!(input_line(pending).is_some_and(|l| l.contains("/work housekeeping")));
+}
+
+#[test]
+fn a_numbered_dialog_line_is_not_the_input_box() {
+    use herdr_fleet::relaunch::input_line;
+    let dialog = "Do you trust this folder?\n❯ 1. Yes, proceed\n  2. No, exit\n";
+    assert_eq!(input_line(dialog), None);
+    let box_over_menu = "❯ 1. Yes\n────\n❯ \n────\n";
+    assert_eq!(input_line(box_over_menu).map(str::trim), Some(""));
+}

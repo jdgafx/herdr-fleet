@@ -46,9 +46,14 @@ jobs:
           else
             shasum -a 256 "herdr-fleet-${{ matrix.target }}.tar.gz" > "herdr-fleet-${{ matrix.target }}.tar.gz.sha256"
           fi
+      - name: Debian package
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: scripts/make-deb.sh "${GITHUB_REF_NAME#v}" "target/${{ matrix.target }}/release/herdr-fleet" "target/${{ matrix.target }}/release"
       - name: Upload to the release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             target/${{ matrix.target }}/release/herdr-fleet-${{ matrix.target }}.tar.gz
             target/${{ matrix.target }}/release/herdr-fleet-${{ matrix.target }}.tar.gz.sha256
+            target/${{ matrix.target }}/release/*.deb
+            target/${{ matrix.target }}/release/*.deb.sha256

@@ -80,7 +80,16 @@ curl -fsSL https://raw.githubusercontent.com/jdgafx/herdr-fleet/main/install.sh 
 That downloads the prebuilt binary for this platform from
 [GitHub Releases](https://github.com/jdgafx/herdr-fleet/releases), verifies its
 SHA-256, and installs it to `~/.local/bin` (`INSTALL_DIR` overrides; `VERSION` pins
-a release). From source, instead:
+a release). Every release since v0.2.4 also ships a Debian package for x86_64:
+
+```bash
+# to /usr/bin (needs root):
+sudo dpkg -i herdr-fleet_<version>_amd64.deb
+# remove with:
+sudo dpkg -r herdr-fleet
+```
+
+From source, instead:
 
 ```bash
 cargo install --git https://github.com/jdgafx/herdr-fleet

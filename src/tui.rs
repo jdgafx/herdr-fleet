@@ -17,12 +17,13 @@ use ratatui::{Frame, Terminal};
 use tachyonfx::{fx, Effect, Interpolation};
 use throbber_widgets_tui::{symbols, Throbber, ThrobberState};
 
+use crate::fetch::{Done, Worker};
 use crate::herdr::Herdr;
 use crate::model::{is_stalled, AgentRow, Fleet, Options};
 use crate::parser::truncate;
 use crate::price;
 use crate::theme::{Theme, ThemeName};
-use crate::transcript::{ToolCall, TranscriptTracker};
+use crate::transcript::ToolCall;
 
 /// How the dashboard looks: colour theme and whether the transition effects run.
 #[derive(Debug, Clone, Copy)]
@@ -50,10 +51,13 @@ struct DetailView {
 }
 
 struct App {
-    herdr: Herdr,
+    /// Fleet refreshes and every herdr call a key makes run here, off the UI thread.
+    worker: Worker,
+    /// A fleet refresh has been requested and its result has not arrived yet.
+    refresh_in_flight: bool,
+    /// Kept on the UI side for the render: where queue checklists live, and the quiet time.
     queue_dir: Option<PathBuf>,
-    options: Options,
-    tracker: TranscriptTracker,
+    quiet: Duration,
     interval: Duration,
     stall: Duration,
     alerts: bool,
@@ -91,10 +95,10 @@ impl App {
         look: Look,
     ) -> Self {
         Self {
-            herdr,
-            queue_dir,
-            options,
-            tracker: TranscriptTracker::default(),
+            queue_dir: queue_dir.clone(),
+            quiet: options.quiet,
+            worker: Worker::spawn(herdr, queue_dir, options),
+            refresh_in_flight: false,
             interval,
             stall,
             alerts,
@@ -117,60 +121,114 @@ impl App {
         }
     }
 
+    /// Ask the worker for a fresh snapshot. Returns at once; one refresh at a time.
     fn refresh(&mut self) {
-        match Fleet::collect(
-            &self.herdr,
-            self.queue_dir.as_deref(),
-            &self.options,
-            &mut self.tracker,
-        ) {
-            Ok(fleet) => {
-                let now = Instant::now();
-                for a in &fleet.agents {
-                    let seen = self.since.get(&a.pane_id).map(|(seq, _)| *seq);
-                    if seen != Some(a.state_change_seq) {
-                        self.since
-                            .insert(a.pane_id.clone(), (a.state_change_seq, now));
-                    }
-                }
-                let live: Vec<String> = fleet.agents.iter().map(|a| a.pane_id.clone()).collect();
-                self.since.retain(|k, _| live.contains(k));
-                if self.fx {
-                    for a in &fleet.agents {
-                        let changed = self
-                            .prev_status
-                            .get(&a.pane_id)
-                            .is_some_and(|prev| *prev != a.status);
-                        if changed {
-                            self.fade_pending.push(a.pane_id.clone());
-                        }
-                        self.prev_status.insert(a.pane_id.clone(), a.status.clone());
-                    }
-                    self.prev_status.retain(|k, _| live.contains(k));
-                }
-                match self.table.selected() {
-                    Some(i) if i < fleet.agents.len() => {}
-                    _ => self.table.select(if fleet.agents.is_empty() {
-                        None
-                    } else {
-                        Some(0)
-                    }),
-                }
-                if self.alerts {
-                    self.alert_on(&fleet);
-                }
-                self.status = format!(
-                    "{} agents · {} queues · herdr {} · ~{} est spend",
-                    fleet.agents.len(),
-                    fleet.queues.len(),
-                    fleet.herdr_version,
-                    price::fmt_usd(fleet.total_cost_usd)
-                );
-                self.fleet = fleet;
-                self.last_fetch = now;
-            }
-            Err(e) => self.status = format!("error: {e:#}"),
+        if self.refresh_in_flight {
+            return;
         }
+        self.refresh_in_flight = true;
+        self.last_fetch = Instant::now();
+        self.worker.request_refresh();
+    }
+
+    /// Take every finished job the worker has. Never blocks the UI thread.
+    fn pump(&mut self) {
+        while let Some(done) = self.worker.try_recv() {
+            self.handle(done);
+        }
+    }
+
+    /// Apply one finished job. Returns true when it was a fleet snapshot.
+    fn handle(&mut self, done: Done) -> bool {
+        match done {
+            Done::Fleet(Ok(fleet)) => {
+                self.refresh_in_flight = false;
+                self.apply_fleet(fleet);
+                true
+            }
+            Done::Fleet(Err(e)) => {
+                self.refresh_in_flight = false;
+                self.status = format!("error: {e}");
+                true
+            }
+            Done::Tail { pane, text } => {
+                if let Some(detail) = self.detail.as_mut().filter(|d| d.pane_id == pane) {
+                    detail.output = match text {
+                        Ok(tail) => {
+                            let all: Vec<&str> = tail.lines().collect();
+                            let start = all.len().saturating_sub(30);
+                            all[start..]
+                                .iter()
+                                .map(|l| l.trim_end().to_string())
+                                .collect()
+                        }
+                        Err(e) => vec![format!("(pane read failed: {e})")],
+                    };
+                }
+                false
+            }
+            Done::Note(note) => {
+                if !note.is_empty() {
+                    self.status = note;
+                }
+                false
+            }
+        }
+    }
+
+    /// Block (up to 30 s per step) until a snapshot is in. Only for the offscreen snapshot.
+    fn refresh_and_wait(&mut self) {
+        self.refresh();
+        while let Some(done) = self.worker.recv_timeout(Duration::from_secs(30)) {
+            if self.handle(done) {
+                return;
+            }
+        }
+    }
+
+    fn apply_fleet(&mut self, fleet: Fleet) {
+        let now = Instant::now();
+        for a in &fleet.agents {
+            let seen = self.since.get(&a.pane_id).map(|(seq, _)| *seq);
+            if seen != Some(a.state_change_seq) {
+                self.since
+                    .insert(a.pane_id.clone(), (a.state_change_seq, now));
+            }
+        }
+        let live: Vec<String> = fleet.agents.iter().map(|a| a.pane_id.clone()).collect();
+        self.since.retain(|k, _| live.contains(k));
+        if self.fx {
+            for a in &fleet.agents {
+                let changed = self
+                    .prev_status
+                    .get(&a.pane_id)
+                    .is_some_and(|prev| *prev != a.status);
+                if changed {
+                    self.fade_pending.push(a.pane_id.clone());
+                }
+                self.prev_status.insert(a.pane_id.clone(), a.status.clone());
+            }
+            self.prev_status.retain(|k, _| live.contains(k));
+        }
+        match self.table.selected() {
+            Some(i) if i < fleet.agents.len() => {}
+            _ => self.table.select(if fleet.agents.is_empty() {
+                None
+            } else {
+                Some(0)
+            }),
+        }
+        if self.alerts {
+            self.alert_on(&fleet);
+        }
+        self.status = format!(
+            "{} agents · {} queues · herdr {} · ~{} est spend",
+            fleet.agents.len(),
+            fleet.queues.len(),
+            fleet.herdr_version,
+            price::fmt_usd(fleet.total_cost_usd)
+        );
+        self.fleet = fleet;
     }
 
     /// Fire one herdr notification per pane per kind when it first appears.
@@ -204,12 +262,12 @@ impl App {
                 .find(|a| a.pane_id == pane)
                 .map(|a| truncate(&format!("{} — {}", a.status, a.last_line), 120))
                 .unwrap_or_default();
-            if let Err(e) = self
-                .herdr
-                .notify(&format!("herdr-fleet: {kind} {pane}"), &body)
-            {
-                self.status = format!("alert failed: {e:#}");
-            }
+            let title = format!("herdr-fleet: {kind} {pane}");
+            self.worker
+                .action(move |herdr| match herdr.notify(&title, &body) {
+                    Ok(()) => Done::Note(String::new()),
+                    Err(e) => Done::Note(format!("alert failed: {e:#}")),
+                });
         }
     }
 
@@ -233,10 +291,13 @@ impl App {
 
     fn focus_selected(&mut self) {
         if let Some(pane) = self.selected_pane() {
-            self.status = match self.herdr.focus(&pane) {
-                Ok(()) => format!("focused {pane}"),
-                Err(e) => format!("focus failed: {e:#}"),
-            };
+            self.status = format!("focusing {pane}…");
+            self.worker.action(move |herdr| {
+                Done::Note(match herdr.focus(&pane) {
+                    Ok(()) => format!("focused {pane}"),
+                    Err(e) => format!("focus failed: {e:#}"),
+                })
+            });
         }
     }
 
@@ -247,10 +308,13 @@ impl App {
         let Some(pane) = self.selected_pane() else {
             return;
         };
-        self.status = match self.herdr.prompt(&pane, &text) {
-            Ok(()) => format!("sent prompt to {pane}"),
-            Err(e) => format!("prompt failed: {e:#}"),
-        };
+        self.status = format!("sending prompt to {pane}…");
+        self.worker.action(move |herdr| {
+            Done::Note(match herdr.prompt(&pane, &text) {
+                Ok(()) => format!("sent prompt to {pane}"),
+                Err(e) => format!("prompt failed: {e:#}"),
+            })
+        });
         self.refresh();
     }
 
@@ -266,17 +330,11 @@ impl App {
         let Some(row) = self.fleet.agents.get(i).cloned() else {
             return;
         };
-        let mut output: Vec<String> = Vec::new();
-        match self.herdr.read_tail(&row.pane_id, 30) {
-            Ok(tail) => {
-                let all: Vec<&str> = tail.lines().collect();
-                let start = all.len().saturating_sub(30);
-                for l in &all[start..] {
-                    output.push(l.trim_end().to_string());
-                }
-            }
-            Err(e) => output.push(format!("(pane read failed: {e:#})")),
-        }
+        let pane = row.pane_id.clone();
+        self.worker.action(move |herdr| Done::Tail {
+            text: herdr.read_tail(&pane, 30).map_err(|e| format!("{e:#}")),
+            pane,
+        });
         let queue = self
             .fleet
             .queues
@@ -312,7 +370,7 @@ impl App {
                 .unwrap_or_else(|| "-".into()),
             queue,
             tools: row.tool_calls.iter().rev().take(5).rev().cloned().collect(),
-            output,
+            output: vec!["loading…".into()],
         });
     }
 
@@ -379,7 +437,7 @@ impl App {
             in_state,
             self.stall,
             a.transcript_quiet_secs.map(Duration::from_secs),
-            self.options.quiet,
+            self.quiet,
         )
     }
 
@@ -870,6 +928,7 @@ impl App {
 
     fn main_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
         while !self.quit {
+            self.pump();
             terminal.draw(|f| self.render(f))?;
             let remaining = self.interval.saturating_sub(self.last_fetch.elapsed());
             let timeout = remaining.min(Duration::from_millis(200));
@@ -880,6 +939,7 @@ impl App {
                     }
                 }
             }
+            self.pump();
             if self.last_fetch.elapsed() >= self.interval {
                 self.refresh();
             }
@@ -934,7 +994,7 @@ pub fn snapshot(
         false,
         look,
     );
-    app.refresh();
+    app.refresh_and_wait();
     let mut terminal = Terminal::new(TestBackend::new(width, height))?;
     terminal.draw(|f| app.render(f))?;
     Ok(terminal.backend().buffer().clone())

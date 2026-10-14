@@ -1,11 +1,18 @@
 //! Thin wrapper over the `herdr` CLI (its socket JSON API).
 
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Stdio};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
 use crate::model::AgentInfo;
+
+/// Longest a single herdr call may run before it is killed and reported as failed.
+/// A slow call must not stall the dashboard: its pane keeps its last value instead.
+pub const CALL_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A handle to the herdr executable.
 #[derive(Clone)]
@@ -26,22 +33,39 @@ impl Herdr {
         Self { bin: bin.into() }
     }
 
-    /// Run herdr with `args`, returning stdout on success.
+    /// Run herdr with `args`, returning stdout on success. Fails after `CALL_TIMEOUT`.
     pub fn run(&self, args: &[&str]) -> Result<String> {
-        let out = Command::new(&self.bin)
+        let cmd = format!("{} {}", self.bin, args.join(" "));
+        let mut child = Command::new(&self.bin)
             .args(args)
-            .output()
-            .with_context(|| format!("failed to run `{} {}`", self.bin, args.join(" ")))?;
-        if !out.status.success() {
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("failed to run `{cmd}`"))?;
+        let stdout = pipe_reader(child.stdout.take());
+        let stderr = pipe_reader(child.stderr.take());
+        let deadline = Instant::now() + CALL_TIMEOUT;
+        let status = loop {
+            if let Some(status) = child.try_wait().context("waiting on herdr")? {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("`{cmd}` timed out after {}s", CALL_TIMEOUT.as_secs());
+            }
+            thread::sleep(Duration::from_millis(5));
+        };
+        let out = stdout.join().unwrap_or_default();
+        if !status.success() {
+            let err = stderr.join().unwrap_or_default();
             bail!(
-                "`{} {}` exited with {}: {}",
-                self.bin,
-                args.join(" "),
-                out.status,
-                String::from_utf8_lossy(&out.stderr).trim()
+                "`{cmd}` exited with {status}: {}",
+                String::from_utf8_lossy(&err).trim()
             );
         }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        Ok(String::from_utf8_lossy(&out).into_owned())
     }
 
     fn json(&self, args: &[&str]) -> Result<Value> {
@@ -147,16 +171,20 @@ impl Herdr {
 
     /// The foreground processes of a pane as (pid, argv), for the drift check.
     pub fn foreground_processes(&self, pane: &str) -> Vec<(u32, Vec<String>)> {
-        let Ok(value) = self.json(&["pane", "process-info", "--pane", pane]) else {
-            return Vec::new();
-        };
+        self.try_foreground_processes(pane).unwrap_or_default()
+    }
+
+    /// Like `foreground_processes`, but a failed or timed-out call is an error,
+    /// so the caller can tell "no process" from "herdr did not answer".
+    pub fn try_foreground_processes(&self, pane: &str) -> Result<Vec<(u32, Vec<String>)>> {
+        let value = self.json(&["pane", "process-info", "--pane", pane])?;
         let Some(procs) = value
             .pointer("/result/process_info/foreground_processes")
             .and_then(Value::as_array)
         else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        procs
+        Ok(procs
             .iter()
             .filter_map(|p| {
                 let pid = u32::try_from(p.get("pid")?.as_u64()?).ok()?;
@@ -168,7 +196,7 @@ impl Herdr {
                     .collect();
                 Some((pid, argv))
             })
-            .collect()
+            .collect())
     }
 
     /// The last `lines` lines of a pane's terminal output, as plain text.
@@ -217,4 +245,15 @@ impl Herdr {
         ])
         .map(|_| ())
     }
+}
+
+/// Drain a child's pipe on its own thread, so a full pipe never blocks the child.
+fn pipe_reader<R: Read + Send + 'static>(pipe: Option<R>) -> JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    })
 }

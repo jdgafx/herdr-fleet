@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::herdr::Herdr;
 
 /// Commands a roster line may launch.
-const LAUNCH_COMMANDS: [&str; 3] = ["claude", "cc-deepseek", "cc-luna"];
+const LAUNCH_COMMANDS: [&str; 4] = ["claude", "cc-deepseek", "cc-luna", "cc-claude-luna"];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Roster {
@@ -27,7 +27,8 @@ pub struct Roster {
 pub struct Entry {
     pub pane: String,
     pub queue: String,
-    /// `claude`, `cc-deepseek` or `cc-luna` (KC.3: Claude-flag drop-in on Codex Luna 6).
+    /// `claude`, `cc-deepseek`, `cc-luna` (KC.3: Claude-flag drop-in on Codex Luna 6) or
+    /// `cc-claude-luna` (KF: Claude Code itself, with Luna 6 behind a local proxy).
     pub command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -249,14 +250,23 @@ pub struct Live {
 
 /// The live launch of a pane's Claude worker, or `None` when none is running there.
 pub fn live_launch(herdr: &Herdr, pane: &str) -> Option<Live> {
-    let (pid, argv) = herdr
-        .foreground_processes(pane)
+    try_live_launch(herdr, pane).ok().flatten()
+}
+
+/// The live launch of a pane. `Err` means herdr did not answer (for example a
+/// timeout), which is not the same as "nothing is running there".
+pub fn try_live_launch(herdr: &Herdr, pane: &str) -> Result<Option<Live>> {
+    let Some((pid, argv)) = herdr
+        .try_foreground_processes(pane)?
         .into_iter()
-        .find(|(_, argv)| argv.iter().any(|a| is_launch_token(a)))?;
-    Some(Live {
+        .find(|(_, argv)| argv.iter().any(|a| is_launch_token(a)))
+    else {
+        return Ok(None);
+    };
+    Ok(Some(Live {
         argv,
         env: read_environ(pid),
-    })
+    }))
 }
 
 fn is_launch_token(arg: &str) -> bool {

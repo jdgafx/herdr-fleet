@@ -1,5 +1,6 @@
 //! Fleet collection: turn herdr state plus pane text into renderable rows.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -148,6 +149,7 @@ impl AgentRow {
         info: &AgentInfo,
         options: &Options,
         tracker: &mut TranscriptTracker,
+        prev: Option<&AgentRow>,
     ) -> AgentRow {
         let mut row = AgentRow {
             pane_id: info.pane_id.clone(),
@@ -176,26 +178,10 @@ impl AgentRow {
             // Fallback: scrape the pane text — for non-Claude agents only. A
             // Claude pane is read from its transcript, so Claude's own UI chrome
             // (status line, input box, footer) can never be mistaken for output.
-            let tail = herdr.read_tail(&info.pane_id, 60).unwrap_or_default();
-            let lines: Vec<&str> = tail.lines().collect();
-            if let Some(status) = lines
-                .iter()
-                .rev()
-                .find_map(|l| parser::parse_status_line(l))
-            {
-                row.model = Some(status.model).filter(|m| !m.is_empty());
-                row.ctx_percent = status.ctx_percent;
+            match herdr.read_tail(&info.pane_id, 60) {
+                Ok(tail) => scrape_pane(&mut row, &tail),
+                Err(_) => keep_stale(&mut row, prev),
             }
-            if let Some(dialog) = parser::detect_dialog(&lines) {
-                row.flags.push(format!("dialog: {}", truncate(&dialog, 48)));
-            }
-            if let Some((line, count)) = parser::detect_loop(&lines, 3) {
-                row.flags
-                    .push(format!("loop x{count}: {}", parser::short_command(&line)));
-            }
-            row.last_line = parser::last_meaningful_line(&lines)
-                .map(|s| truncate(&s, 120))
-                .unwrap_or_default();
             row.source = SOURCE_PANE.to_string();
         } else {
             // A fresh Claude pane with no assistant turn yet: show the model
@@ -218,6 +204,40 @@ impl AgentRow {
         row.flags
             .retain(|f| !is_expected_loop(f, &options.expected_loops));
         row
+    }
+}
+
+/// Read a non-Claude pane's status, dialog, loop and last line from its text.
+fn scrape_pane(row: &mut AgentRow, tail: &str) {
+    let lines: Vec<&str> = tail.lines().collect();
+    if let Some(status) = lines
+        .iter()
+        .rev()
+        .find_map(|l| parser::parse_status_line(l))
+    {
+        row.model = Some(status.model).filter(|m| !m.is_empty());
+        row.ctx_percent = status.ctx_percent;
+    }
+    if let Some(dialog) = parser::detect_dialog(&lines) {
+        row.flags.push(format!("dialog: {}", truncate(&dialog, 48)));
+    }
+    if let Some((line, count)) = parser::detect_loop(&lines, 3) {
+        row.flags
+            .push(format!("loop x{count}: {}", parser::short_command(&line)));
+    }
+    row.last_line = parser::last_meaningful_line(&lines)
+        .map(|s| truncate(&s, 120))
+        .unwrap_or_default();
+}
+
+/// herdr did not answer for this pane (a timeout, say): keep the last value we
+/// had for it and mark it stale, so one slow pane never blanks or fails the fleet.
+fn keep_stale(row: &mut AgentRow, prev: Option<&AgentRow>) {
+    if let Some(old) = prev {
+        row.model = old.model.clone();
+        row.ctx_percent = old.ctx_percent;
+        row.last_line = old.last_line.clone();
+        row.flags.push("stale".into());
     }
 }
 
@@ -297,11 +317,23 @@ impl Fleet {
         options: &Options,
         tracker: &mut TranscriptTracker,
     ) -> Result<Fleet> {
+        Self::collect_with(herdr, queue_dir, options, tracker, &HashMap::new())
+    }
+
+    /// Like `collect`, but a pane that herdr fails to answer for keeps its
+    /// values from `prev` (the previous snapshot, by pane id) marked `stale`.
+    pub fn collect_with(
+        herdr: &Herdr,
+        queue_dir: Option<&Path>,
+        options: &Options,
+        tracker: &mut TranscriptTracker,
+        prev: &HashMap<String, AgentRow>,
+    ) -> Result<Fleet> {
         let herdr_version = herdr.version();
         let infos = herdr.agents()?;
         let mut agents: Vec<AgentRow> = infos
             .iter()
-            .map(|info| AgentRow::from_info(herdr, info, options, tracker))
+            .map(|info| AgentRow::from_info(herdr, info, options, tracker, prev.get(&info.pane_id)))
             .collect();
         let queues = queue_dir.map(scan_queue_dir).unwrap_or_default();
         if let Some(roster) = &options.roster {
@@ -310,11 +342,26 @@ impl Fleet {
                     continue;
                 };
                 row.name = roster_name(&entry.queue, &row.name);
-                let live = roster::live_launch(herdr, &row.pane_id);
-                let drift = roster::drift(entry, live.as_ref());
-                if !drift.is_empty() {
-                    row.flags
-                        .push(format!("drift: {}", truncate(&drift.join(", "), 60)));
+                match roster::try_live_launch(herdr, &row.pane_id) {
+                    Ok(live) => {
+                        let drift = roster::drift(entry, live.as_ref());
+                        if !drift.is_empty() {
+                            row.flags
+                                .push(format!("drift: {}", truncate(&drift.join(", "), 60)));
+                        }
+                    }
+                    // No answer from herdr is not drift: keep the last drift verdict.
+                    Err(_) => {
+                        if let Some(old) = prev.get(&row.pane_id) {
+                            row.flags.extend(
+                                old.flags
+                                    .iter()
+                                    .filter(|f| f.starts_with("drift:"))
+                                    .cloned(),
+                            );
+                            row.flags.push("stale".into());
+                        }
+                    }
                 }
             }
         }

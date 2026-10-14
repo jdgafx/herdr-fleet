@@ -11,6 +11,7 @@
 //! focus it, and the interactive TUI sends keys/prompts/alerts only when you
 //! press the key for it (or pass `--alerts`).
 
+pub mod fetch;
 pub mod herdr;
 pub mod keys;
 pub mod model;

@@ -23,8 +23,8 @@ Architecture: amd64
 Maintainer: Chris <jdgafx@users.noreply.github.com>
 Homepage: https://github.com/jdgafx/herdr-fleet
 Description: Live fleet dashboard for herdr (Rust TUI)
-Shows every herdr agent pane with status, model, context and cost,
-with a background refresh worker so keys never wait on herdr.
+ Shows every herdr agent pane with status, model, context and cost,
+ with a background refresh worker so keys never wait on herdr.
 EOF
 
 out="$outdir/herdr-fleet_${version}_amd64.deb"

@@ -24,6 +24,8 @@ pub enum Done {
     },
     /// A one-line status for the footer. Empty means nothing to show.
     Note(String),
+    /// Enter focused the pane but no Konsole herdr client exists: attach here (KM.2).
+    Attach(String),
 }
 
 /// Handle the UI thread keeps: it sends work and polls for what came back.

@@ -33,6 +33,11 @@ impl Herdr {
         Self { bin: bin.into() }
     }
 
+    /// The executable this handle runs (the TUI uses it for attach-in-place).
+    pub fn bin(&self) -> &str {
+        &self.bin
+    }
+
     /// Run herdr with `args`, returning stdout on success. Fails after `CALL_TIMEOUT`.
     pub fn run(&self, args: &[&str]) -> Result<String> {
         let cmd = format!("{} {}", self.bin, args.join(" "));

@@ -14,6 +14,7 @@
 pub mod fetch;
 pub mod herdr;
 pub mod keys;
+pub mod konsole;
 pub mod model;
 pub mod parser;
 pub mod price;

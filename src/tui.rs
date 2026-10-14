@@ -82,6 +82,10 @@ struct App {
     fade_pending: Vec<String>,
     prev_status: HashMap<String, String>,
     last_draw: Instant,
+    /// Enter focused a pane but no Konsole herdr client exists: attach here after this frame.
+    pending_attach: Option<String>,
+    /// Last action's one-line result (focus/raise etc.). Survives refreshes; cleared on the next key.
+    action_status: Option<String>,
 }
 
 impl App {
@@ -98,6 +102,8 @@ impl App {
             queue_dir: queue_dir.clone(),
             quiet: options.quiet,
             worker: Worker::spawn(herdr, queue_dir, options),
+            pending_attach: None,
+            action_status: None,
             refresh_in_flight: false,
             interval,
             stall,
@@ -168,9 +174,17 @@ impl App {
                 false
             }
             Done::Note(note) => {
-                if !note.is_empty() {
-                    self.status = note;
+                if note.is_empty() {
+                    self.action_status = None;
+                } else {
+                    // KM.3: the result of Enter/i/alert must stay visible even while
+                    // refreshes keep rewriting the fleet summary in `status`.
+                    self.action_status = Some(note);
                 }
+                false
+            }
+            Done::Attach(pane) => {
+                self.pending_attach = Some(pane);
                 false
             }
         }
@@ -292,11 +306,15 @@ impl App {
     fn focus_selected(&mut self) {
         if let Some(pane) = self.selected_pane() {
             self.status = format!("focusing {pane}…");
-            self.worker.action(move |herdr| {
-                Done::Note(match herdr.focus(&pane) {
-                    Ok(()) => format!("focused {pane}"),
-                    Err(e) => format!("focus failed: {e:#}"),
-                })
+            self.worker.action(move |herdr| match herdr.focus(&pane) {
+                // KM.3: herdr's focus only moves the selection inside a herdr client,
+                // which usually lives in another Konsole tab: raise that tab too.
+                Ok(()) => match crate::konsole::raise_herdr_client() {
+                    Some(note) => Done::Note(format!("focused {pane}; {note}")),
+                    // KM.2: no client tab anywhere - run herdr in this terminal.
+                    None => Done::Attach(pane),
+                },
+                Err(e) => Done::Note(format!("focus failed: {e:#}")),
             });
         }
     }
@@ -376,6 +394,7 @@ impl App {
     }
 
     fn on_key(&mut self, key: KeyEvent) {
+        self.action_status = None;
         if self.input.is_some() {
             match key.code {
                 KeyCode::Esc => self.input = None,
@@ -623,6 +642,9 @@ impl App {
 
     /// The status text: the full line when there is room, a shorter one when not.
     fn header_status(&self, wide: bool) -> String {
+        if let Some(note) = &self.action_status {
+            return note.clone();
+        }
         if wide || self.status.starts_with("error") || self.fleet.herdr_version.is_empty() {
             return self.status.clone();
         }
@@ -927,9 +949,12 @@ impl App {
         );
     }
 
-    fn main_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+    fn main_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<Exit> {
         while !self.quit {
             self.pump();
+            if let Some(pane) = self.pending_attach.take() {
+                return Ok(Exit::Attach(pane));
+            }
             terminal.draw(|f| self.render(f))?;
             let remaining = self.interval.saturating_sub(self.last_fetch.elapsed());
             let timeout = remaining.min(Duration::from_millis(200));
@@ -941,12 +966,22 @@ impl App {
                 }
             }
             self.pump();
+            if let Some(pane) = self.pending_attach.take() {
+                return Ok(Exit::Attach(pane));
+            }
             if self.last_fetch.elapsed() >= self.interval {
                 self.refresh();
             }
         }
-        Ok(())
+        Ok(Exit::Quit)
     }
+}
+
+/// Why main_loop returned.
+enum Exit {
+    Quit,
+    /// Enter on a pane with no Konsole herdr client: run herdr in this terminal.
+    Attach(String),
 }
 
 /// Run the interactive dashboard against the given herdr executable.
@@ -961,6 +996,7 @@ pub fn run(
 ) -> Result<()> {
     // Record our own pane once, so `herdr-fleet back` can find it later.
     let _ = crate::keys::record_fleet_pane(&herdr);
+    let herdr_bin = herdr.bin().to_string();
     let mut terminal = ratatui::init();
     let mut app = App::new(
         herdr,
@@ -972,7 +1008,24 @@ pub fn run(
         look,
     );
     app.refresh();
-    let result = app.main_loop(&mut terminal);
+    let result = loop {
+        match app.main_loop(&mut terminal) {
+            Ok(Exit::Quit) => break Ok(()),
+            Ok(Exit::Attach(pane)) => {
+                // KM.2: hand the terminal to herdr; when its client exits, come back.
+                ratatui::restore();
+                let st = crate::konsole::attach_here(herdr_bin.as_str());
+                terminal = ratatui::init();
+                app.status = match st {
+                    Ok(code) => format!("back from herdr ({pane}): exited {code}"),
+                    Err(e) => format!("back from herdr ({pane}): {e}"),
+                };
+                app.last_fetch = Instant::now() - app.interval; // redraw at once
+                app.refresh();
+            }
+            Err(e) => break Err(e),
+        }
+    };
     ratatui::restore();
     result
 }

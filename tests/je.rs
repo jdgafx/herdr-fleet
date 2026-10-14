@@ -15,12 +15,24 @@ fn mins(m: u64) -> Duration {
 #[test]
 fn a_working_pane_with_a_growing_transcript_is_not_stalled() {
     // 20 minutes in state, past the 15-minute stall, but the transcript changed 2 minutes ago.
-    assert!(!is_stalled("working", mins(20), mins(15), Some(mins(2)), mins(10)));
+    assert!(!is_stalled(
+        "working",
+        mins(20),
+        mins(15),
+        Some(mins(2)),
+        mins(10)
+    ));
 }
 
 #[test]
 fn a_working_pane_silent_for_the_quiet_window_is_stalled() {
-    assert!(is_stalled("working", mins(20), mins(15), Some(mins(11)), mins(10)));
+    assert!(is_stalled(
+        "working",
+        mins(20),
+        mins(15),
+        Some(mins(11)),
+        mins(10)
+    ));
 }
 
 #[test]
@@ -37,17 +49,26 @@ fn no_stall_before_the_stall_time_or_when_not_working() {
 #[test]
 fn an_idle_pane_whose_last_output_asks_for_a_decision_is_waiting() {
     let shown = "**Decision for you:** Q5 and Q6 should be closed as superseded";
-    assert_eq!(waiting_reason("idle", shown, 0).as_deref(), Some("waiting: decision"));
+    assert_eq!(
+        waiting_reason("idle", shown, 0).as_deref(),
+        Some("waiting: decision")
+    );
     assert_eq!(
         waiting_reason("done", "FOR CHRIS: approve the subdomain links", 0).as_deref(),
         Some("waiting: decision")
     );
-    assert_eq!(waiting_reason("idle", "Which one should I take?", 0).as_deref(), Some("waiting: decision"));
+    assert_eq!(
+        waiting_reason("idle", "Which one should I take?", 0).as_deref(),
+        Some("waiting: decision")
+    );
 }
 
 #[test]
 fn an_idle_pane_with_open_unblocked_items_is_waiting() {
-    assert_eq!(waiting_reason("idle", "all good", 3).as_deref(), Some("waiting: 3 open"));
+    assert_eq!(
+        waiting_reason("idle", "all good", 3).as_deref(),
+        Some("waiting: 3 open")
+    );
     assert_eq!(waiting_reason("idle", "all good", 0), None);
 }
 
@@ -58,7 +79,10 @@ fn a_working_pane_is_never_waiting() {
 
 #[test]
 fn the_roster_queue_name_replaces_the_terminal_name() {
-    assert_eq!(roster_name("housekeeping", "CC-MAESTRO user dec..."), "housekeeping");
+    assert_eq!(
+        roster_name("housekeeping", "CC-MAESTRO user dec..."),
+        "housekeeping"
+    );
     assert_eq!(roster_name("", "Claude Code"), "Claude Code");
 }
 
@@ -76,7 +100,10 @@ fn queue(name: &str, open: usize, blocked: usize) -> QueueFile {
 #[test]
 fn a_pane_is_matched_to_its_queue_file_by_stem() {
     let queues = vec![queue("conductor.md", 2, 0), queue("housekeeping.md", 4, 1)];
-    assert_eq!(queue_for(&queues, "housekeeping", "Claude Code").map(|q| q.open), Some(4));
+    assert_eq!(
+        queue_for(&queues, "housekeeping", "Claude Code").map(|q| q.open),
+        Some(4)
+    );
     assert!(queue_for(&queues, "Claude Code", "Claude Code").is_none());
 }
 
@@ -106,8 +133,16 @@ fn readme_and_loop_prompts_are_not_queues() {
 fn the_queue_panel_lists_only_real_queues() {
     let dir = std::env::temp_dir().join(format!("je-queues-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("housekeeping.md"), "- [ ] Q1 | a | blocked waiting\n- [ ] Q2 | b\n").unwrap();
-    std::fs::write(dir.join("README.md"), "- [ ] looks like an item but is a README\n").unwrap();
+    std::fs::write(
+        dir.join("housekeeping.md"),
+        "- [ ] Q1 | a | blocked waiting\n- [ ] Q2 | b\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("README.md"),
+        "- [ ] looks like an item but is a README\n",
+    )
+    .unwrap();
     std::fs::write(dir.join("loop-prompt.md"), "- [ ] a prompt, not a queue\n").unwrap();
     std::fs::write(dir.join("notes.md"), "just prose, no checklist\n").unwrap();
     let found = scan_queue_dir(&dir);

@@ -103,7 +103,9 @@ pub fn is_leftover(task: &str) -> bool {
     let plain = !t.contains([';', '&', '|', '`', '$', '<', '>']);
     let sleep_holder = words.first() == Some(&"sleep") && plain && words.len() <= 4;
     let finished_poller = words.first().is_some_and(|w| w.contains("poll"))
-        && ["(done)", "(finished)", "(exited)"].iter().any(|m| t.ends_with(m));
+        && ["(done)", "(finished)", "(exited)"]
+            .iter()
+            .any(|m| t.ends_with(m));
     sleep_holder || finished_poller
 }
 
@@ -117,11 +119,20 @@ pub fn plan_steps(entry: &Entry, running: bool) -> Vec<String> {
         steps.push(format!(
             "read the pane for \"{DIALOG_HEADER}\": leftovers only -> send the option key ({EXIT_OPTION}); live or unreadable -> stop and report"
         ));
-        steps.push(format!("wait until `herdr agent list` no longer shows {pane} as claude (60 s)"));
+        steps.push(format!(
+            "wait until `herdr agent list` no longer shows {pane} as claude (60 s)"
+        ));
     }
-    steps.push(format!("herdr pane run {pane} {}", shell_quote_arg(&entry.launch_line())));
-    steps.push(format!("wait until `herdr agent list` shows {pane} as claude (60 s)"));
-    steps.push(format!("wait until the pane shows Claude's input box (`{INPUT_MARK}`) (60 s), then 2 s"));
+    steps.push(format!(
+        "herdr pane run {pane} {}",
+        shell_quote_arg(&entry.launch_line())
+    ));
+    steps.push(format!(
+        "wait until `herdr agent list` shows {pane} as claude (60 s)"
+    ));
+    steps.push(format!(
+        "wait until the pane shows Claude's input box (`{INPUT_MARK}`) (60 s), then 2 s"
+    ));
     steps.push(format!("herdr agent prompt {pane} '/work {}'", entry.queue));
     steps.push(format!("herdr agent wait {pane} --until working --timeout {SENT_WAIT_MS}; not working -> stop and report, no resend"));
     steps
@@ -140,7 +151,10 @@ pub fn relaunch(herdr: &Herdr, roster: &Roster, pane: &str, dry_run: bool) -> Re
         bail!("pane {pane} is not in the roster");
     };
     if entry.paused {
-        bail!("pane {pane} ({}) is paused in the roster; refusing to relaunch", entry.queue);
+        bail!(
+            "pane {pane} ({}) is paused in the roster; refusing to relaunch",
+            entry.queue
+        );
     }
     let agent = claude_agent(herdr, pane)?;
     // A live process counts even when herdr's agent record has not caught up.
@@ -158,9 +172,15 @@ pub fn relaunch(herdr: &Herdr, roster: &Roster, pane: &str, dry_run: bool) -> Re
     };
     let steps = plan_steps(entry, running);
     if dry_run {
-        println!("[dry-run] {pane} {} (claude running: {}, status: {status})", entry.queue, yes_no(running));
+        println!(
+            "[dry-run] {pane} {} (claude running: {}, status: {status})",
+            entry.queue,
+            yes_no(running)
+        );
         if !safe_status {
-            println!("[dry-run]   a live relaunch would refuse: status is {status}, only idle or done");
+            println!(
+                "[dry-run]   a live relaunch would refuse: status is {status}, only idle or done"
+            );
         }
         for step in &steps {
             println!("[dry-run]   {step}");
@@ -168,10 +188,17 @@ pub fn relaunch(herdr: &Herdr, roster: &Roster, pane: &str, dry_run: bool) -> Re
         return Ok(());
     }
     if !safe_status {
-        bail!("{pane} ({}) is {status}; relaunch only an idle or done worker", entry.queue);
+        bail!(
+            "{pane} ({}) is {status}; relaunch only an idle or done worker",
+            entry.queue
+        );
     }
 
-    println!("relaunch {pane} {} (claude running: {}, status: {status})", entry.queue, yes_no(running));
+    println!(
+        "relaunch {pane} {} (claude running: {}, status: {status})",
+        entry.queue,
+        yes_no(running)
+    );
     if running {
         // Same window as the dialog wait below, so a dialog seen there is always a new one.
         let before = herdr.read_tail(pane, EXIT_TAIL_LINES)?;
@@ -182,7 +209,10 @@ pub fn relaunch(herdr: &Herdr, roster: &Roster, pane: &str, dry_run: bool) -> Re
         match wait_for_exit(herdr, pane)? {
             Exit::Gone => {}
             Exit::Dialog(ExitDialog::Leftovers { tasks, key }) => {
-                println!("  exit dialog: leftovers only ({}), choosing {EXIT_OPTION}", tasks.join("; "));
+                println!(
+                    "  exit dialog: leftovers only ({}), choosing {EXIT_OPTION}",
+                    tasks.join("; ")
+                );
                 herdr.run(&["agent", "send-keys", pane, &key])?;
             }
             Exit::Dialog(ExitDialog::Live { tasks }) => {
@@ -216,7 +246,18 @@ fn start_work(herdr: &Herdr, pane: &str, queue: &str) -> Result<()> {
     }
     sleep(Duration::from_secs(2));
     herdr.run(&["agent", "prompt", pane, &command])?;
-    if herdr.run(&["agent", "wait", pane, "--until", "working", "--timeout", SENT_WAIT_MS]).is_ok() {
+    if herdr
+        .run(&[
+            "agent",
+            "wait",
+            pane,
+            "--until",
+            "working",
+            "--timeout",
+            SENT_WAIT_MS,
+        ])
+        .is_ok()
+    {
         return Ok(());
     }
     if is_working(herdr, pane) {
@@ -230,7 +271,10 @@ fn start_work(herdr: &Herdr, pane: &str, queue: &str) -> Result<()> {
 /// Claude's input box is drawn: the last `❯` line on screen is the prompt.
 /// A numbered menu (`❯ 1. Yes`) is a dialog, not the box, so it does not count.
 pub fn input_box_up(herdr: &Herdr, pane: &str) -> bool {
-    herdr.read_tail(pane, EXIT_TAIL_LINES).ok().is_some_and(|t| input_line(&t).is_some())
+    herdr
+        .read_tail(pane, EXIT_TAIL_LINES)
+        .ok()
+        .is_some_and(|t| input_line(&t).is_some())
 }
 
 /// The text of the last input-box line in a pane tail, without the `❯` mark.

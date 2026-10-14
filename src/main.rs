@@ -174,8 +174,15 @@ fn main() -> Result<()> {
                     (false, false) => "stopped",
                 };
                 drifted |= !entry.paused && !drift.is_empty();
-                let verdict = if drift.is_empty() { "ok".into() } else { drift.join(", ") };
-                println!("{:<8} {:<22} {:<8} {}", entry.pane, entry.queue, state, verdict);
+                let verdict = if drift.is_empty() {
+                    "ok".into()
+                } else {
+                    drift.join(", ")
+                };
+                println!(
+                    "{:<8} {:<22} {:<8} {}",
+                    entry.pane, entry.queue, state, verdict
+                );
             }
             if drifted {
                 std::process::exit(1);
@@ -183,7 +190,10 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Relaunch { pane, dry_run } => {
-            let roster = options.roster.clone().context("no roster to relaunch from")?;
+            let roster = options
+                .roster
+                .clone()
+                .context("no roster to relaunch from")?;
             relaunch::relaunch(&herdr, &roster, &pane, dry_run)
         }
         Cmd::Roster {

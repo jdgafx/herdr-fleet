@@ -95,7 +95,10 @@ mod unit {
         assert!(matches!(latte.accent, Color::Rgb(..)));
         assert_ne!(mocha.text, latte.text);
         for c in [ansi.accent, ansi.working, ansi.blocked, ansi.muted] {
-            assert!(!matches!(c, Color::Rgb(..)), "{c:?} is not a 16-colour value");
+            assert!(
+                !matches!(c, Color::Rgb(..)),
+                "{c:?} is not a 16-colour value"
+            );
         }
     }
 }

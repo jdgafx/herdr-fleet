@@ -46,7 +46,10 @@ fn no_dialog_means_none() {
 #[test]
 fn a_dialog_without_the_exit_option_is_not_acted_on() {
     let text = "Background work is running\n  - sleep 60 holder\n  2. Keep running\n";
-    assert!(matches!(parse_exit_dialog(text), Some(ExitDialog::Live { .. })));
+    assert!(matches!(
+        parse_exit_dialog(text),
+        Some(ExitDialog::Live { .. })
+    ));
 }
 
 #[test]
@@ -63,14 +66,19 @@ fn leftover_classification() {
 #[test]
 fn one_live_task_among_leftovers_stops_the_relaunch() {
     let text = "Background work is running\n  - sleep 60 holder\n  - npm run dev\n  1. Exit and stop tasks\n  2. Keep running\n";
-    assert!(matches!(parse_exit_dialog(text), Some(ExitDialog::Live { .. })));
+    assert!(matches!(
+        parse_exit_dialog(text),
+        Some(ExitDialog::Live { .. })
+    ));
 }
 
 #[test]
 fn a_numbered_live_task_is_not_taken_for_an_option() {
     let text = "Background work is running\n  - sleep 60 holder\n  1. sleep 5; ./run.sh\n  1. Exit and stop tasks\n  2. Keep running\n";
     match parse_exit_dialog(text) {
-        Some(ExitDialog::Live { tasks }) => assert!(tasks.contains(&"1. sleep 5; ./run.sh".to_string())),
+        Some(ExitDialog::Live { tasks }) => {
+            assert!(tasks.contains(&"1. sleep 5; ./run.sh".to_string()))
+        }
         other => panic!("expected live, got {other:?}"),
     }
 }
@@ -79,7 +87,9 @@ fn a_numbered_live_task_is_not_taken_for_an_option() {
 fn a_task_that_starts_with_an_option_label_stays_a_task() {
     let text = "Background work is running\n  - sleep 60 holder\n  1. Cancel nightly job; ./run.sh\n  1. Exit and stop tasks\n  2. Keep running\n";
     match parse_exit_dialog(text) {
-        Some(ExitDialog::Live { tasks }) => assert!(tasks.contains(&"1. Cancel nightly job; ./run.sh".to_string())),
+        Some(ExitDialog::Live { tasks }) => {
+            assert!(tasks.contains(&"1. Cancel nightly job; ./run.sh".to_string()))
+        }
         other => panic!("expected live, got {other:?}"),
     }
 }
@@ -87,12 +97,16 @@ fn a_task_that_starts_with_an_option_label_stays_a_task() {
 #[test]
 fn the_newest_dialog_is_the_one_read() {
     let text = "Background work is running\n  - npm run dev\n  1. Exit and stop tasks\n  2. Keep running\n$ prompt\nBackground work is running\n  - sleep 60 holder\n  1. Exit and stop tasks\n  2. Keep running\n";
-    assert!(matches!(parse_exit_dialog(text), Some(ExitDialog::Leftovers { .. })));
+    assert!(matches!(
+        parse_exit_dialog(text),
+        Some(ExitDialog::Leftovers { .. })
+    ));
 }
 
 #[test]
 fn a_paused_pane_is_refused_before_any_herdr_call() {
-    let (roster, _) = Roster::import("- w1C:p4 disputes claude --model sonnet --effort high ~/x PAUSED").unwrap();
+    let (roster, _) =
+        Roster::import("- w1C:p4 disputes claude --model sonnet --effort high ~/x PAUSED").unwrap();
     let herdr = herdr_fleet::herdr::Herdr::new("/nonexistent/herdr");
     let err = herdr_fleet::relaunch::relaunch(&herdr, &roster, "w1C:p4", false).unwrap_err();
     assert!(err.to_string().contains("paused"), "{err}");
@@ -100,15 +114,19 @@ fn a_paused_pane_is_refused_before_any_herdr_call() {
 
 #[test]
 fn plan_for_a_running_worker_starts_with_exit_and_ends_with_work() {
-    let (roster, _) = Roster::import(
-        "- w1F:p1 housekeeping env -u A claude --model haiku --effort medium ~",
-    )
-    .unwrap();
+    let (roster, _) =
+        Roster::import("- w1F:p1 housekeeping env -u A claude --model haiku --effort medium ~")
+            .unwrap();
     let entry = roster.find("w1F:p1").unwrap();
     let steps = plan_steps(entry, true);
     assert_eq!(steps.first().unwrap(), "herdr agent prompt w1F:p1 /exit");
-    assert!(steps.iter().any(|s| s.starts_with("herdr pane run w1F:p1 ")));
-    assert!(steps.last().unwrap().contains("no resend"), "the plan ends with the confirm-or-report step");
+    assert!(steps
+        .iter()
+        .any(|s| s.starts_with("herdr pane run w1F:p1 ")));
+    assert!(
+        steps.last().unwrap().contains("no resend"),
+        "the plan ends with the confirm-or-report step"
+    );
     assert!(steps.contains(&"herdr agent prompt w1F:p1 '/work housekeeping'".to_string()));
 }
 
@@ -144,7 +162,9 @@ fn live_tasks_that_contain_hint_words_are_never_dropped() {
             "Background work is running\n  - sleep 60 holder\n  - {task}\n  1. Exit and stop tasks\n  2. Keep running\n"
         );
         match parse_exit_dialog(&text) {
-            Some(ExitDialog::Live { tasks }) => assert!(tasks.contains(&task.to_string()), "{task}: {tasks:?}"),
+            Some(ExitDialog::Live { tasks }) => {
+                assert!(tasks.contains(&task.to_string()), "{task}: {tasks:?}")
+            }
             other => panic!("{task}: a live task must stop the relaunch, got {other:?}"),
         }
     }
@@ -164,12 +184,29 @@ fn the_real_layout_with_only_leftovers_chooses_option_one() {
 
 #[test]
 fn the_plan_waits_for_the_input_box_before_sending_work() {
-    let entry = Entry { pane: "w1F:p1".into(), queue: "housekeeping".into(), command: "claude".into(), ..Entry::default() };
+    let entry = Entry {
+        pane: "w1F:p1".into(),
+        queue: "housekeeping".into(),
+        command: "claude".into(),
+        ..Entry::default()
+    };
     let steps = plan_steps(&entry, false);
-    let box_at = steps.iter().position(|s| s.contains("input box")).expect("input-box wait");
-    let work_at = steps.iter().position(|s| s.contains("/work ")).expect("/work send");
-    assert!(box_at < work_at, "the input box must be waited for before /work: {steps:?}");
-    assert!(steps.iter().any(|s| s.contains("no resend")), "a send that does not start is reported, never repeated");
+    let box_at = steps
+        .iter()
+        .position(|s| s.contains("input box"))
+        .expect("input-box wait");
+    let work_at = steps
+        .iter()
+        .position(|s| s.contains("/work "))
+        .expect("/work send");
+    assert!(
+        box_at < work_at,
+        "the input box must be waited for before /work: {steps:?}"
+    );
+    assert!(
+        steps.iter().any(|s| s.contains("no resend")),
+        "a send that does not start is reported, never repeated"
+    );
 }
 
 #[test]

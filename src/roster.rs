@@ -53,13 +53,21 @@ pub struct Entry {
 impl Roster {
     /// Read a roster file.
     pub fn load(path: &Path) -> Result<Roster> {
-        let text = fs::read_to_string(path)
-            .with_context(|| format!("no roster at {} (seed it with `roster import`)", path.display()))?;
+        let text = fs::read_to_string(path).with_context(|| {
+            format!(
+                "no roster at {} (seed it with `roster import`)",
+                path.display()
+            )
+        })?;
         let roster: Roster =
             toml::from_str(&text).with_context(|| format!("bad roster {}", path.display()))?;
         for entry in &roster.panes {
             if !LAUNCH_COMMANDS.contains(&entry.command.as_str()) {
-                bail!("pane {}: command `{}` is not one of {LAUNCH_COMMANDS:?}", entry.pane, entry.command);
+                bail!(
+                    "pane {}: command `{}` is not one of {LAUNCH_COMMANDS:?}",
+                    entry.pane,
+                    entry.command
+                );
             }
         }
         Ok(roster)
@@ -114,7 +122,12 @@ pub fn parse_line(line: &str) -> Result<Option<Entry>> {
         return Ok(None);
     }
     // Searched after the queue name, so a queue called `claude` is not read as the command.
-    let Some(cmd_idx) = tokens.iter().skip(2).position(|t| LAUNCH_COMMANDS.contains(t)).map(|i| i + 2) else {
+    let Some(cmd_idx) = tokens
+        .iter()
+        .skip(2)
+        .position(|t| LAUNCH_COMMANDS.contains(t))
+        .map(|i| i + 2)
+    else {
         return Ok(None);
     };
     let mut entry = Entry {
@@ -146,7 +159,9 @@ pub fn parse_line(line: &str) -> Result<Option<Entry>> {
     while j < tokens.len() {
         let t = tokens[j];
         if t == "--model" || t == "--effort" {
-            let value = tokens.get(j + 1).with_context(|| format!("{t} without a value"))?;
+            let value = tokens
+                .get(j + 1)
+                .with_context(|| format!("{t} without a value"))?;
             if t == "--model" {
                 entry.model = Some(value.to_string());
             } else {

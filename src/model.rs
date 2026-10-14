@@ -303,7 +303,8 @@ impl Fleet {
                 let live = roster::live_launch(herdr, &row.pane_id);
                 let drift = roster::drift(entry, live.as_ref());
                 if !drift.is_empty() {
-                    row.flags.push(format!("drift: {}", truncate(&drift.join(", "), 60)));
+                    row.flags
+                        .push(format!("drift: {}", truncate(&drift.join(", "), 60)));
                 }
             }
         }

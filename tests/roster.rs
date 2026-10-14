@@ -13,7 +13,9 @@ fn argv(s: &str) -> Vec<String> {
 }
 
 fn housekeeping() -> Entry {
-    parse_line(HOUSEKEEPING.trim_start_matches("- ")).unwrap().unwrap()
+    parse_line(HOUSEKEEPING.trim_start_matches("- "))
+        .unwrap()
+        .unwrap()
 }
 
 fn live(args: &str, env: &[(&str, &str)]) -> Live {
@@ -36,7 +38,12 @@ fn parses_a_worker_line() {
     assert_eq!(e.effort.as_deref(), Some("medium"));
     assert_eq!(e.flags, vec!["--dangerously-skip-permissions"]);
     assert_eq!(e.unset, vec!["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"]);
-    assert_eq!(e.env.get("CLAUDE_CODE_DISABLE_ADVISOR_TOOL").map(String::as_str), Some("1"));
+    assert_eq!(
+        e.env
+            .get("CLAUDE_CODE_DISABLE_ADVISOR_TOOL")
+            .map(String::as_str),
+        Some("1")
+    );
     assert_eq!(e.folder, "~");
     assert!(!e.paused);
 }
@@ -106,14 +113,32 @@ fn drift_names_each_difference() {
     let e = housekeeping();
     let l = live(
         "claude --model opus --effort medium",
-        &[("CLAUDE_CODE_SUBAGENT_MODEL", "opus"), ("ANTHROPIC_API_KEY", "set")],
+        &[
+            ("CLAUDE_CODE_SUBAGENT_MODEL", "opus"),
+            ("ANTHROPIC_API_KEY", "set"),
+        ],
     );
     let d = drift(&e, Some(&l));
-    assert!(d.contains(&"model opus != roster haiku".to_string()), "{d:?}");
-    assert!(d.contains(&"missing flag --dangerously-skip-permissions".to_string()), "{d:?}");
-    assert!(d.contains(&"env CLAUDE_CODE_SUBAGENT_MODEL differs".to_string()), "{d:?}");
-    assert!(d.contains(&"env CLAUDE_CODE_DISABLE_ADVISOR_TOOL missing".to_string()), "{d:?}");
-    assert!(d.contains(&"env ANTHROPIC_API_KEY should be unset".to_string()), "{d:?}");
+    assert!(
+        d.contains(&"model opus != roster haiku".to_string()),
+        "{d:?}"
+    );
+    assert!(
+        d.contains(&"missing flag --dangerously-skip-permissions".to_string()),
+        "{d:?}"
+    );
+    assert!(
+        d.contains(&"env CLAUDE_CODE_SUBAGENT_MODEL differs".to_string()),
+        "{d:?}"
+    );
+    assert!(
+        d.contains(&"env CLAUDE_CODE_DISABLE_ADVISOR_TOOL missing".to_string()),
+        "{d:?}"
+    );
+    assert!(
+        d.contains(&"env ANTHROPIC_API_KEY should be unset".to_string()),
+        "{d:?}"
+    );
 }
 
 #[test]
@@ -132,7 +157,10 @@ fn drift_reports_a_wrong_effort() {
     let e = housekeeping();
     let l = live(
         "claude --dangerously-skip-permissions --model haiku --effort high",
-        &[("CLAUDE_CODE_SUBAGENT_MODEL", "haiku"), ("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "1")],
+        &[
+            ("CLAUDE_CODE_SUBAGENT_MODEL", "haiku"),
+            ("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "1"),
+        ],
     );
     assert_eq!(drift(&e, Some(&l)), vec!["effort high != roster medium"]);
 }
@@ -142,7 +170,11 @@ fn a_hand_edited_command_is_rejected_on_load() {
     let dir = std::env::temp_dir().join(format!("roster-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("roster.toml");
-    std::fs::write(&path, "[[pane]]\npane = \"w1F:p1\"\nqueue = \"q\"\ncommand = \"rm\"\n").unwrap();
+    std::fs::write(
+        &path,
+        "[[pane]]\npane = \"w1F:p1\"\nqueue = \"q\"\ncommand = \"rm\"\n",
+    )
+    .unwrap();
     let err = Roster::load(&path).unwrap_err();
     assert!(err.to_string().contains("not one of"), "{err}");
     std::fs::remove_dir_all(&dir).ok();

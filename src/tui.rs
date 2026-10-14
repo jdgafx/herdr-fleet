@@ -414,7 +414,11 @@ impl App {
             return Line::from(Span::styled("-", Style::default().fg(self.theme.muted)));
         };
         if !bar {
-            let color = if c >= 80 { self.theme.alarm } else { self.theme.text };
+            let color = if c >= 80 {
+                self.theme.alarm
+            } else {
+                self.theme.text
+            };
             return Line::from(Span::styled(format!("{c}%"), Style::default().fg(color)));
         }
         let filled = ((c as usize * 5 + 50) / 100).min(5);
@@ -431,10 +435,7 @@ impl App {
                 "░".repeat(5 - filled),
                 Style::default().fg(self.theme.surface),
             ),
-            Span::styled(
-                format!(" {c:>3}%"),
-                Style::default().fg(self.theme.text),
-            ),
+            Span::styled(format!(" {c:>3}%"), Style::default().fg(self.theme.text)),
         ])
     }
 
@@ -450,7 +451,10 @@ impl App {
         };
         Line::from(vec![
             Span::styled("█".repeat(filled), Style::default().fg(self.theme.accent)),
-            Span::styled("░".repeat(5 - filled), Style::default().fg(self.theme.surface)),
+            Span::styled(
+                "░".repeat(5 - filled),
+                Style::default().fg(self.theme.surface),
+            ),
             Span::styled(
                 format!(" {}", price::fmt_usd(c)),
                 Style::default().fg(self.theme.text),
@@ -711,11 +715,9 @@ impl App {
                     height: 1,
                 };
                 if row.y < area.y + area.height.saturating_sub(1) {
-                    let fade = fx::fade_from_fg(
-                        self.theme.accent,
-                        (FADE_MS, Interpolation::QuadOut),
-                    )
-                    .with_area(row);
+                    let fade =
+                        fx::fade_from_fg(self.theme.accent, (FADE_MS, Interpolation::QuadOut))
+                            .with_area(row);
                     self.effects.push(fade);
                 }
             }

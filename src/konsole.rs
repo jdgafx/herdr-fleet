@@ -59,12 +59,14 @@ fn find_herdr_session() -> Option<(String, i32)> {
 pub fn raise_herdr_client() -> Option<String> {
     let (svc, id) = find_herdr_session()?;
     let tree = qdbus(&[&svc])?;
-    let mut switched = false;
+    let mut state = None;
     for wline in tree.lines() {
         let wpath = wline.trim();
         if !wpath.starts_with("/Windows/") {
             continue;
         }
+        let before = qdbus(&[&svc, wpath, "org.kde.konsole.Window.currentSession"])
+            .map(|s| s.trim().to_string());
         qdbus(&[
             &svc,
             wpath,
@@ -73,21 +75,22 @@ pub fn raise_herdr_client() -> Option<String> {
         ]);
         // Verify: a session in another window (not exported here) is a silent no-op.
         if let Some(cur) = qdbus(&[&svc, wpath, "org.kde.konsole.Window.currentSession"]) {
-            if cur.trim() == id.to_string() {
-                switched = true;
+            let cur = cur.trim().to_string();
+            if cur == id.to_string() {
+                state = Some(if before.as_deref() == Some(cur.as_str()) {
+                    format!("Konsole herdr tab already showing (session {id})")
+                } else {
+                    format!("switched Konsole to herdr tab (session {id})")
+                });
             }
         }
         // Best-effort window raise (X11 outright; on Wayland KWin has the final say).
         qdbus(&[&svc, wpath, "org.qtproject.Qt.QWidget.raise"]);
         qdbus(&[&svc, wpath, "org.qtproject.Qt.QWidget.showNormal"]);
     }
-    if switched {
-        Some(format!("raised Konsole herdr tab (session {id})"))
-    } else {
-        // The client exists but lives in a window Konsole does not export over dbus:
-        // the tab cannot be switched from here; the caller attaches in place instead.
-        None
-    }
+    // None means: the client exists but lives in a window Konsole does not export over
+    // dbus (the tab cannot be switched from here) — the caller attaches in place instead.
+    state
 }
 
 /// Run the herdr client in this terminal (KM.2 attach-in-place fallback).

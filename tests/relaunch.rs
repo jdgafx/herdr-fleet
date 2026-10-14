@@ -2,7 +2,7 @@
 //! the real dialog wording has not been captured yet (see the live proof).
 
 use herdr_fleet::relaunch::{is_leftover, parse_exit_dialog, plan_steps, ExitDialog};
-use herdr_fleet::roster::Roster;
+use herdr_fleet::roster::{Entry, Roster};
 
 const LEFTOVERS: &str = "\
 Background work is running
@@ -108,7 +108,7 @@ fn plan_for_a_running_worker_starts_with_exit_and_ends_with_work() {
     let steps = plan_steps(entry, true);
     assert_eq!(steps.first().unwrap(), "herdr agent prompt w1F:p1 /exit");
     assert!(steps.iter().any(|s| s.starts_with("herdr pane run w1F:p1 ")));
-    assert_eq!(steps.last().unwrap(), "herdr agent wait w1F:p1 --until working --timeout 120000");
+    assert!(steps.last().unwrap().contains("resend once"), "the plan ends with the confirm-or-resend step");
     assert!(steps.contains(&"herdr agent prompt w1F:p1 '/work housekeeping'".to_string()));
 }
 
@@ -160,4 +160,25 @@ fn the_real_layout_with_only_leftovers_chooses_option_one() {
         }
         other => panic!("expected leftovers on the real layout, got {other:?}"),
     }
+}
+
+#[test]
+fn the_plan_waits_for_the_input_box_before_sending_work() {
+    let entry = Entry { pane: "w1F:p1".into(), queue: "housekeeping".into(), command: "claude".into(), ..Entry::default() };
+    let steps = plan_steps(&entry, false);
+    let box_at = steps.iter().position(|s| s.contains("input box")).expect("input-box wait");
+    let work_at = steps.iter().position(|s| s.contains("/work ")).expect("/work send");
+    assert!(box_at < work_at, "the input box must be waited for before /work: {steps:?}");
+    assert!(steps.iter().any(|s| s.contains("resend once")), "a missed send must be resent once");
+}
+
+#[test]
+fn input_box_is_read_from_the_last_prompt_line() {
+    use herdr_fleet::relaunch::input_line;
+    let banner_only = "Claude Code v2\n  Haiku 5.5 with medium effort\n";
+    assert_eq!(input_line(banner_only), None);
+    let idle = "────\n❯ \n────\n  ~ | Haiku 5.5\n";
+    assert_eq!(input_line(idle).map(str::trim), Some(""));
+    let pending = "────\n❯ /work housekeeping\n────\n";
+    assert!(input_line(pending).is_some_and(|l| l.contains("/work housekeeping")));
 }

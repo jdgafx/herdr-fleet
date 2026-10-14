@@ -179,3 +179,17 @@ fn a_hand_edited_command_is_rejected_on_load() {
     assert!(err.to_string().contains("not one of"), "{err}");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn cc_luna_is_accepted_as_a_launch_command() {
+    // KC.3: a roster line may swap `claude` for the cc-luna drop-in and keep the same flags.
+    let (roster, skipped) = Roster::import(
+        "- w1F:p1 housekeeping env CLAUDE_CODE_SUBAGENT_MODEL=haiku cc-luna --model haiku --effort medium ~",
+    )
+    .unwrap();
+    assert!(skipped.is_empty(), "{skipped:?}");
+    let e = roster.find("w1F:p1").unwrap();
+    assert_eq!(e.command, "cc-luna");
+    assert_eq!(e.model.as_deref(), Some("haiku"));
+    assert_eq!(e.effort.as_deref(), Some("medium"));
+}

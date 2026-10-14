@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::herdr::Herdr;
 
 /// Commands a roster line may launch.
-const LAUNCH_COMMANDS: [&str; 2] = ["claude", "cc-deepseek"];
+const LAUNCH_COMMANDS: [&str; 3] = ["claude", "cc-deepseek", "cc-luna"];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Roster {
@@ -27,7 +27,7 @@ pub struct Roster {
 pub struct Entry {
     pub pane: String,
     pub queue: String,
-    /// `claude` or `cc-deepseek`.
+    /// `claude`, `cc-deepseek` or `cc-luna` (KC.3: Claude-flag drop-in on Codex Luna 6).
     pub command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,

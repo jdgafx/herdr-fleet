@@ -95,6 +95,8 @@ pub fn cost_usd(
 
 /// `1.235` -> `$1.23`; a tiny positive amount -> `<$0.01`.
 pub fn fmt_usd(v: f64) -> String {
+    // Spend is never negative; a `-0.00` here came from a fold over no rows.
+    let v = v.max(0.0);
     if v > 0.0 && v < 0.005 {
         "<$0.01".to_string()
     } else {
@@ -141,5 +143,7 @@ mod unit {
         assert_eq!(fmt_usd(1.234), "$1.23");
         assert_eq!(fmt_usd(12.3456), "$12.35");
         assert_eq!(fmt_usd(0.0), "$0.00");
+        assert_eq!(fmt_usd(-0.0), "$0.00", "a fold over no rows gives -0.0");
+        assert_eq!(fmt_usd(-0.001), "$0.00");
     }
 }

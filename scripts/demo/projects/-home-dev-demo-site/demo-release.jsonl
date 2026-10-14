@@ -1,0 +1,2 @@
+{"type": "user", "message": {"role": "user", "content": "Update the changelog for the 0.4 release."}}
+{"type": "assistant", "message": {"model": "claude-sonnet-5-5", "usage": {"input_tokens": 2, "cache_read_input_tokens": 240000, "cache_creation_input_tokens": 0, "output_tokens": 180}, "content": [{"type": "text", "text": "Changelog updated: 6 entries, dates checked against the tags."}]}}

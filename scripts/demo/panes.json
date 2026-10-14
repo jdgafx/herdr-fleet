@@ -1,0 +1,7 @@
+{
+  "frontend": {"pane_id": "w1A:p1", "status": "working", "session": "demo-frontend", "argv": ["claude", "--model", "haiku", "--effort", "medium"]},
+  "release":  {"pane_id": "w1B:p2", "status": "idle",    "session": "demo-release",  "argv": ["claude", "--model", "sonnet", "--effort", "high"]},
+  "research": {"pane_id": "w1C:p3", "status": "done",    "session": "demo-research", "argv": ["claude", "--model", "haiku", "--effort", "medium"]},
+  "docs":     {"pane_id": "w1D:p4", "status": "blocked", "session": "demo-docs",     "argv": ["claude", "--model", "haiku", "--effort", "medium"]},
+  "lead":     {"pane_id": "w1E:p5", "status": "done",    "session": "demo-lead",     "argv": ["claude", "--model", "opus", "--effort", "high"]}
+}

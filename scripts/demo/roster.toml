@@ -1,0 +1,54 @@
+[[pane]]
+pane = "w1A:p1"
+queue = "frontend"
+command = "claude"
+model = "haiku"
+effort = "medium"
+folder = "~/demo/site"
+
+[pane.env]
+CLAUDE_CODE_SUBAGENT_MODEL = "haiku"
+
+[[pane]]
+pane = "w1B:p2"
+queue = "release"
+command = "claude"
+model = "sonnet"
+effort = "high"
+folder = "~/demo/site"
+
+[pane.env]
+CLAUDE_CODE_SUBAGENT_MODEL = "haiku"
+
+[[pane]]
+pane = "w1C:p3"
+queue = "research"
+command = "claude"
+model = "haiku"
+effort = "medium"
+folder = "~/demo/site"
+
+[pane.env]
+CLAUDE_CODE_SUBAGENT_MODEL = "haiku"
+
+[[pane]]
+pane = "w1D:p4"
+queue = "docs"
+command = "claude"
+model = "haiku"
+effort = "medium"
+folder = "~/demo/site"
+
+[pane.env]
+CLAUDE_CODE_SUBAGENT_MODEL = "haiku"
+
+[[pane]]
+pane = "w1E:p5"
+queue = "lead"
+command = "claude"
+model = "opus"
+effort = "high"
+folder = "~/demo/site"
+
+[pane.env]
+CLAUDE_CODE_SUBAGENT_MODEL = "haiku"

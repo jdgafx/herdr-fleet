@@ -33,6 +33,8 @@ pub struct Options {
     pub roster: Option<Roster>,
     /// A working pane counts as stalled only when its transcript has been silent this long.
     pub quiet: Duration,
+    /// Commands that are meant to repeat (e.g. a wait loop); a `loop` flag naming one is dropped.
+    pub expected_loops: Vec<String>,
 }
 
 impl Default for Options {
@@ -42,6 +44,7 @@ impl Default for Options {
             context_window: 1_000_000,
             roster: None,
             quiet: Duration::from_secs(10 * 60),
+            expected_loops: Vec::new(),
         }
     }
 }
@@ -212,8 +215,15 @@ impl AgentRow {
         if info.agent_status == "blocked" {
             row.flags.push("blocked".into());
         }
+        row.flags
+            .retain(|f| !is_expected_loop(f, &options.expected_loops));
         row
     }
+}
+
+/// True for a `loop xN: <command>` flag whose command is on the expected list.
+pub fn is_expected_loop(flag: &str, expected: &[String]) -> bool {
+    flag.starts_with("loop x") && expected.iter().any(|e| flag.contains(e.as_str()))
 }
 
 /// Fill the detail columns from the pane's Claude transcript. Returns false

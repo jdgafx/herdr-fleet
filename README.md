@@ -8,10 +8,11 @@ open-item counts of your markdown queues.
 Built for a machine that runs a fleet of Claude Code agents in herdr panes and
 needs to see, at a glance, which pane needs attention.
 
-![herdr-fleet running against a live fleet](docs/screenshot.png)
+![herdr-fleet running against a demo fleet](docs/screenshot.png)
 
-The capture is a real run against a live fleet; the queues panel uses
-[`docs/demo-queue`](docs/demo-queue) so no private checklist names are shown.
+The capture is the TUI run against a demo fleet (`scripts/demo`): synthetic panes,
+transcripts and the queues in [`docs/demo-queue`](docs/demo-queue), so no private
+names, work or output appear in it.
 
 ## What it shows
 
@@ -101,6 +102,8 @@ Options:
       --interval <SECS>          TUI refresh interval          [default: 2]
       --stall-secs <SECS>        "working" past this = stalled [default: 900]
       --alerts                   desktop alert when a pane goes blocked/stalled/looping
+      --expected-loops <FILE>    commands allowed to repeat, one per line
+                                 [default: $XDG_CONFIG_HOME/herdr-fleet/expected-loops]
 
 Commands:
   tui            Run the interactive dashboard (default)
@@ -109,16 +112,16 @@ Commands:
   install-keys   Write the herdr key binding that runs `herdr-fleet back`
 ```
 
-`herdr-fleet list` against a live fleet:
+`herdr-fleet list` against the demo fleet in `scripts/demo` (synthetic panes and transcripts):
 
 ```
-herdr-fleet · herdr 0.9.2-preview · 5 agents · ~$24.24 est spend
-PANE     NAME                   STATUS   MODEL           CTX    COST  LAST OUTPUT
-w1D:pM   Deepseek agents with … working  Opus 5.5        26%  $22.78  It's served from `docs/fleet/index.html` by…
-w19:pG   Claude Code            done     deepseek-flash  31%   $0.20  GitHub-side nothing changed since the hando…
-w1C:p3   Claude Code            working  deepseek-flash  29%   $0.09
-w1F:p1   Claude Code            working  deepseek-flash  48%   $0.77  One test assertion is wrong (1.235 in f64 i…
-w1E:p1   Claude Code            working  deepseek-flash  38%   $0.40  PR #83 is open. Now waiting on the Tavily s…
+herdr-fleet · herdr 0.9.2 · 5 agents · ~$0.30 est spend
+PANE     NAME                   STATUS   MODEL           CTX    COST  LAST OUTPUT                                  FLAGS
+w1A:p1   frontend               working  Haiku 5.5       11%  <$0.01  Running the lint pass on the new components… 
+w1B:p2   release                idle     Sonnet 5.5      24%   $0.05  Changelog updated: 6 entries, dates checked… 
+w1C:p3   research               done     Haiku 5.5        5%  <$0.01  Summary written to notes/generators.md: bui… 
+w1D:p4   docs                   blocked  Haiku 5.5        9%  <$0.01  Waiting for a decision: keep the Homebrew s… blocked
+w1E:p5   lead                   done     Opus 5.5        61%   $0.25  Merge order: docs first, then the feed chan… 
 ```
 
 `--json` prints the same snapshot as machine-readable JSON (per-pane `cost_usd`,
@@ -158,6 +161,19 @@ stored in `~/.local/state/herdr-fleet/back.json`) and focuses it again — falli
 back to the pane's tab (then its workspace) when the recorded pane has no agent
 to address, and exiting non-zero if the exact pane could not be focused.
 
+## Expected loops
+
+A pane that runs the same command three or more times in a row is flagged
+`loop xN`. Some commands repeat on purpose, such as a wait loop that checks an
+inbox. List those in `$XDG_CONFIG_HOME/herdr-fleet/expected-loops` (or `--expected-loops`),
+one command fragment per line; blank lines and `#` comments are skipped. A loop
+flag whose command contains a listed fragment is dropped:
+
+```
+# wait loops that repeat on purpose
+inbox-wait.sh
+```
+
 ## Queues
 
 Point `--queue-dir` at any folder of markdown checklists. Each `*.md` file is
@@ -194,7 +210,11 @@ CI runs all three, plus a release build, on every push and pull request. Pushing
 a `v*` tag builds prebuilt binaries for Linux (x86_64, aarch64) and macOS (arm64)
 and attaches them, with SHA-256 checksums, to the GitHub Release.
 
-`scripts/screenshot.sh` regenerates the image above from a real run via tmux.
+`scripts/screenshot.sh` regenerates the image above via tmux. By default it runs
+the demo fleet in `scripts/demo`: a stub `herdr` that reports synthetic panes, demo
+transcripts, a demo roster and the queues in `docs/demo-queue`. Nothing in it is
+live, so the image is safe to publish. `DEMO=0 scripts/screenshot.sh` captures the
+live fleet instead; its LAST OUTPUT column is always redacted (`scripts/scrub_last_output.py`).
 
 ## License
 

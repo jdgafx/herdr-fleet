@@ -1,6 +1,6 @@
 [package]
 name = "herdr-fleet"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.76"
 description = "A terminal dashboard for herdr agent panes: status, model, context %, stalls, loops and approval dialogs at a glance."
@@ -28,7 +28,6 @@ serde_json = "1"
 tachyonfx = "0.25.2"
 throbber-widgets-tui = "0.11.1"
 toml = "0.9"
-tui-big-text = "0.8.10"
 
 [profile.release]
 lto = true

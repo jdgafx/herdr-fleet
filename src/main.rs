@@ -29,6 +29,10 @@ struct Cli {
     #[arg(long, global = true, env = "CLAUDE_PROJECTS_DIR")]
     claude_projects: Option<PathBuf>,
 
+    /// Expected-loops list: one command fragment per line (default: $XDG_CONFIG_HOME/herdr-fleet/expected-loops)
+    #[arg(long, global = true)]
+    expected_loops: Option<PathBuf>,
+
     /// Tokens in the model's context window; 1M-context models use 1000000
     #[arg(long, global = true, default_value_t = 1_000_000)]
     context_window: u64,
@@ -129,6 +133,11 @@ fn main() -> Result<()> {
         options.projects_dir = dir;
     }
     options.context_window = cli.context_window;
+    let loops_path = cli
+        .expected_loops
+        .clone()
+        .unwrap_or_else(roster::expected_loops_path);
+    options.expected_loops = roster::load_expected_loops(&loops_path)?;
     options.quiet = std::time::Duration::from_secs(cli.quiet_mins * 60);
     if roster_path.exists() {
         options.roster = Some(Roster::load(&roster_path)?);

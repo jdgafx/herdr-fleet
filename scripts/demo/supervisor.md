@@ -1,0 +1,5 @@
+- w1A:p1 frontend env CLAUDE_CODE_SUBAGENT_MODEL=haiku claude --model haiku --effort medium ~/demo/site
+- w1B:p2 release env CLAUDE_CODE_SUBAGENT_MODEL=haiku claude --model sonnet --effort high ~/demo/site
+- w1C:p3 research env CLAUDE_CODE_SUBAGENT_MODEL=haiku claude --model haiku --effort medium ~/demo/site
+- w1D:p4 docs env CLAUDE_CODE_SUBAGENT_MODEL=haiku claude --model haiku --effort medium ~/demo/site
+- w1E:p5 lead env CLAUDE_CODE_SUBAGENT_MODEL=haiku claude --model opus --effort high ~/demo/site

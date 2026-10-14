@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""Demo stand-in for the `herdr` CLI: synthetic panes for README captures.
+
+Reads panes.json next to this file. Pids for the drift check come from the
+DEMO_PIDS file (lines: "<pane> <pid>"), written by scripts/screenshot.sh after it
+starts one sleeping process per pane with the roster's environment.
+Anything else exits 1 with an error object, as herdr does for unknown calls.
+"""
+import json, os, pathlib, sys
+
+HERE = pathlib.Path(__file__).resolve().parent
+args = sys.argv[1:]
+
+def out(obj):
+    print(json.dumps(obj))
+
+def panes():
+    data = json.loads((HERE / "panes.json").read_text())
+    rows = []
+    for i, (name, p) in enumerate(data.items()):
+        rows.append({
+            "agent": "claude", "agent_status": p["status"], "pane_id": p["pane_id"],
+            "tab_id": p["pane_id"].split(":")[0] + ":t1", "workspace_id": p["pane_id"].split(":")[0],
+            "cwd": "/home/dev/demo-site", "foreground_cwd": "/home/dev/demo-site",
+            "focused": i == 0, "terminal_title": "Claude Code", "terminal_title_stripped": "Claude Code",
+            "completion_seq": i, "state_change_seq": i,
+            "agent_session": {"kind": "claude", "source": "demo", "value": p["session"]},
+        })
+    return rows, data
+
+def pid_for(pane):
+    path = os.environ.get("DEMO_PIDS")
+    if not path or not pathlib.Path(path).exists():
+        return None
+    for line in pathlib.Path(path).read_text().splitlines():
+        p, pid = line.split()
+        if p == pane:
+            return int(pid)
+    return None
+
+if args == ["--version"]:
+    print("herdr 0.9.2 (demo)")
+elif args[:2] == ["api", "snapshot"]:
+    rows, _ = panes()
+    out({"id": "cli:api:snapshot", "result": {"snapshot": {"panes": rows}}})
+elif args[:2] == ["agent", "list"]:
+    rows, _ = panes()
+    out({"id": "cli:agent:list", "result": {"agents": rows}})
+elif args[:2] == ["pane", "process-info"]:
+    pane = args[args.index("--pane") + 1]
+    _, data = panes()
+    entry = next((p for p in data.values() if p["pane_id"] == pane), None)
+    pid = pid_for(pane)
+    if entry is None or pid is None:
+        out({"id": "cli:pane:process-info", "result": {"process_info": {"foreground_processes": []}}})
+    else:
+        procs = [{"pid": pid, "argv": entry["argv"]}]
+        out({"id": "cli:pane:process-info", "result": {"process_info": {"foreground_processes": procs}}})
+else:
+    out({"id": "demo", "error": {"code": "unsupported", "message": "demo herdr: " + " ".join(args)}})
+    sys.exit(1)

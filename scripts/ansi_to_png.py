@@ -27,10 +27,10 @@ BRIGHT = [
 ]
 SGR = re.compile(r"\x1b\[([0-9;]*)m")
 
-# Decorative glyphs the TUI uses that DejaVu Sans Mono lacks.
+# Decorative glyphs the TUI uses that DejaVu Sans Mono lacks (block elements are in DejaVu, so they render as they are).
 SUBST = str.maketrans({
     "⏵": ">", "✳": "*", "✻": "*", "◐": "o",
-    "❯": ">", "▶": ">", "█": "#",
+    "❯": ">", "▶": ">",
 })
 
 

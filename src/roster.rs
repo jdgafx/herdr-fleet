@@ -328,3 +328,26 @@ pub fn default_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".config"));
     base.join("herdr-fleet").join("roster.toml")
 }
+
+/// The expected-loops list: `$XDG_CONFIG_HOME/herdr-fleet/expected-loops`, or under `~/.config`.
+pub fn expected_loops_path() -> PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .unwrap_or_else(|| PathBuf::from(".config"));
+    base.join("herdr-fleet").join("expected-loops")
+}
+
+/// One command fragment per line; blank lines and `#` comments are skipped.
+/// A missing file means an empty list.
+pub fn load_expected_loops(path: &Path) -> Result<Vec<String>> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Ok(Vec::new());
+    };
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_string)
+        .collect())
+}

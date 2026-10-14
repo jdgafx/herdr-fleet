@@ -16,7 +16,6 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Table
 use ratatui::{Frame, Terminal};
 use tachyonfx::{fx, Effect, Interpolation};
 use throbber_widgets_tui::{symbols, Throbber, ThrobberState};
-use tui_big_text::{BigText, PixelSize};
 
 use crate::herdr::Herdr;
 use crate::model::{is_stalled, AgentRow, Fleet, Options};
@@ -32,7 +31,7 @@ pub struct Look {
     pub fx: bool,
 }
 
-/// From this terminal width the header shows the big fleet count.
+/// From this terminal width the table shows the COST column.
 const WIDE: u16 = 100;
 /// Length of the fade on a row whose state changed.
 const FADE_MS: u32 = 450;
@@ -364,7 +363,8 @@ impl App {
             _ => self.theme.muted,
         };
         Span::styled(
-            format!(" {status} "),
+            // Padded to the longest label, so the pills line up down the STATUS column.
+            format!(" {status:<7} "),
             Style::default()
                 .fg(self.theme.on_accent)
                 .bg(bg)
@@ -399,7 +399,7 @@ impl App {
             spans.push(
                 Throbber::default()
                     .throbber_style(Style::default().fg(self.theme.working))
-                    .throbber_set(symbols::throbber::BRAILLE_SIX)
+                    .throbber_set(symbols::throbber::ASCII)
                     .to_symbol_span(&self.throbber),
             );
             spans.push(Span::raw(" "));
@@ -611,19 +611,7 @@ impl App {
         ]);
         let info = Paragraph::new(vec![title, legend]);
 
-        if wide {
-            let [count_area, info_area] =
-                Layout::horizontal([Constraint::Length(20), Constraint::Min(0)]).areas(inner);
-            let count = BigText::builder()
-                .pixel_size(PixelSize::Quadrant)
-                .style(Style::default().fg(self.theme.accent))
-                .lines(vec![self.fleet.agents.len().to_string().into()])
-                .build();
-            f.render_widget(count, count_area);
-            f.render_widget(info, info_area);
-        } else {
-            f.render_widget(info, inner);
-        }
+        f.render_widget(info, inner);
     }
 
     fn render_table(&mut self, f: &mut Frame, area: Rect) {
@@ -695,11 +683,8 @@ impl App {
                     .border_style(Style::default().fg(self.theme.border))
                     .title(" fleet "),
             )
-            .row_highlight_style(
-                Style::default()
-                    .fg(self.theme.text)
-                    .add_modifier(Modifier::BOLD),
-            )
+            // Bold only: a foreground here would overwrite the coloured status pill on the selected row.
+            .row_highlight_style(Style::default().add_modifier(Modifier::BOLD))
             .highlight_symbol("▶ ")
             .column_spacing(1);
         f.render_stateful_widget(table, area, &mut self.table);

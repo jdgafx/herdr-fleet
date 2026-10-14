@@ -108,7 +108,7 @@ fn plan_for_a_running_worker_starts_with_exit_and_ends_with_work() {
     let steps = plan_steps(entry, true);
     assert_eq!(steps.first().unwrap(), "herdr agent prompt w1F:p1 /exit");
     assert!(steps.iter().any(|s| s.starts_with("herdr pane run w1F:p1 ")));
-    assert!(steps.last().unwrap().contains("resend once"), "the plan ends with the confirm-or-resend step");
+    assert!(steps.last().unwrap().contains("no resend"), "the plan ends with the confirm-or-report step");
     assert!(steps.contains(&"herdr agent prompt w1F:p1 '/work housekeeping'".to_string()));
 }
 
@@ -169,7 +169,7 @@ fn the_plan_waits_for_the_input_box_before_sending_work() {
     let box_at = steps.iter().position(|s| s.contains("input box")).expect("input-box wait");
     let work_at = steps.iter().position(|s| s.contains("/work ")).expect("/work send");
     assert!(box_at < work_at, "the input box must be waited for before /work: {steps:?}");
-    assert!(steps.iter().any(|s| s.contains("resend once")), "a missed send must be resent once");
+    assert!(steps.iter().any(|s| s.contains("no resend")), "a send that does not start is reported, never repeated");
 }
 
 #[test]
@@ -181,4 +181,13 @@ fn input_box_is_read_from_the_last_prompt_line() {
     assert_eq!(input_line(idle).map(str::trim), Some(""));
     let pending = "────\n❯ /work housekeeping\n────\n";
     assert!(input_line(pending).is_some_and(|l| l.contains("/work housekeeping")));
+}
+
+#[test]
+fn a_numbered_dialog_line_is_not_the_input_box() {
+    use herdr_fleet::relaunch::input_line;
+    let dialog = "Do you trust this folder?\n❯ 1. Yes, proceed\n  2. No, exit\n";
+    assert_eq!(input_line(dialog), None);
+    let box_over_menu = "❯ 1. Yes\n────\n❯ \n────\n";
+    assert_eq!(input_line(box_over_menu).map(str::trim), Some(""));
 }

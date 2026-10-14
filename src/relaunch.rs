@@ -20,8 +20,9 @@ pub const DIALOG_HEADER: &str = "Background work is running";
 pub const EXIT_OPTION: &str = "Exit and stop tasks";
 /// Mark Claude Code draws at the start of its input box.
 pub const INPUT_MARK: &str = "❯";
-/// How long to wait for a sent `/work` to start the worker before resending once.
-const SENT_WAIT_MS: &str = "20000";
+/// How long to wait for a sent `/work` to start the worker. The send is never repeated:
+/// a slow start that is repeated would queue `/work` twice.
+const SENT_WAIT_MS: &str = "120000";
 /// Lines of pane text read for the exit dialog, both before and after `/exit`.
 const EXIT_TAIL_LINES: u32 = 60;
 /// The line the dialog shows before its task list.
@@ -122,8 +123,7 @@ pub fn plan_steps(entry: &Entry, running: bool) -> Vec<String> {
     steps.push(format!("wait until `herdr agent list` shows {pane} as claude (60 s)"));
     steps.push(format!("wait until the pane shows Claude's input box (`{INPUT_MARK}`) (60 s), then 2 s"));
     steps.push(format!("herdr agent prompt {pane} '/work {}'", entry.queue));
-    steps.push(format!("herdr agent wait {pane} --until working --timeout {SENT_WAIT_MS}"));
-    steps.push(format!("if not working and /work not in the input box: resend once, then wait {SENT_WAIT_MS} ms"));
+    steps.push(format!("herdr agent wait {pane} --until working --timeout {SENT_WAIT_MS}; not working -> stop and report, no resend"));
     steps
 }
 
@@ -207,8 +207,8 @@ pub fn relaunch(herdr: &Herdr, roster: &Roster, pane: &str, dry_run: bool) -> Re
 }
 
 /// Send `/work <queue>` once Claude's input box is up, then confirm it started.
-/// A send that never lands (the R1 defect: sent before the input was ready) is
-/// resent once, but only when the box shows no `/work` text, so nothing doubles.
+/// The send is made once and never repeated: a repeat after a slow start would queue
+/// `/work` twice. A send that does not start work is reported with the pane state.
 fn start_work(herdr: &Herdr, pane: &str, queue: &str) -> Result<()> {
     let command = format!("/work {queue}");
     if !wait_until(|| input_box_up(herdr, pane), 60) {
@@ -223,23 +223,29 @@ fn start_work(herdr: &Herdr, pane: &str, queue: &str) -> Result<()> {
         return Ok(());
     }
     let tail = herdr.read_tail(pane, EXIT_TAIL_LINES)?;
-    if input_line(&tail).is_some_and(|line| line.contains(&command)) {
-        bail!("{pane}: `{command}` is in the input box but did not submit; check the pane");
-    }
-    println!("  {pane}: `{command}` did not start work; resending once");
-    herdr.run(&["agent", "prompt", pane, &command])?;
-    herdr.run(&["agent", "wait", pane, "--until", "working", "--timeout", "120000"])?;
-    Ok(())
+    let box_text = input_line(&tail).unwrap_or("(no input box on screen)");
+    bail!("{pane}: `{command}` did not start work within {SENT_WAIT_MS} ms; not resent. Input box: {box_text:?}. Check the pane.");
 }
 
 /// Claude's input box is drawn: the last `❯` line on screen is the prompt.
+/// A numbered menu (`❯ 1. Yes`) is a dialog, not the box, so it does not count.
 pub fn input_box_up(herdr: &Herdr, pane: &str) -> bool {
     herdr.read_tail(pane, EXIT_TAIL_LINES).ok().is_some_and(|t| input_line(&t).is_some())
 }
 
 /// The text of the last input-box line in a pane tail, without the `❯` mark.
 pub fn input_line(tail: &str) -> Option<&str> {
-    tail.lines().rev().find_map(|l| l.trim_start().strip_prefix(INPUT_MARK))
+    tail.lines().rev().find_map(|l| {
+        let text = l.trim_start().strip_prefix(INPUT_MARK)?;
+        (!is_menu_item(text)).then_some(text)
+    })
+}
+
+/// `1. Yes` or `2) No`: a numbered choice in a dialog.
+fn is_menu_item(text: &str) -> bool {
+    let t = text.trim_start();
+    let digits = t.chars().take_while(|c| c.is_ascii_digit()).count();
+    digits > 0 && t[digits..].starts_with(['.', ')'])
 }
 
 fn is_working(herdr: &Herdr, pane: &str) -> bool {

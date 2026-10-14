@@ -1,6 +1,6 @@
 [package]
 name = "herdr-fleet"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2021"
 rust-version = "1.76"
 description = "A terminal dashboard for herdr agent panes: status, model, context %, stalls, loops and approval dialogs at a glance."

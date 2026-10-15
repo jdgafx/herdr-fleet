@@ -1,0 +1,4 @@
+# Churning state files: rewritten constantly, often smaller, which trips graphify's shrink guard
+# and blocks every graph write (KN.2 fix, 2026-10-15). Their content is not structure.
+RESUME.md
+*.judge.md

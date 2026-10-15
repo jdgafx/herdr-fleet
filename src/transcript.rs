@@ -42,6 +42,12 @@ pub struct TranscriptInfo {
     pub loop_cmd: Option<(String, usize)>,
     /// Estimated session spend at list prices, all assistant turns summed.
     pub cost_usd: Option<f64>,
+    /// Where the figure came from: `api` (live OpenRouter table), `est`
+    /// (static list prices) or `plan` (subscription — tokens only, no USD).
+    pub cost_basis: Option<String>,
+    /// All tokens (input + cache + output) across every priced and unpriced
+    /// model in this session.
+    pub tokens: Option<u64>,
     /// The most recent tool calls, oldest first.
     pub tool_calls: Vec<ToolCall>,
 }
@@ -90,6 +96,8 @@ impl Usage {
 #[derive(Default)]
 pub struct TranscriptTracker {
     files: HashMap<PathBuf, Tracked>,
+    table: Option<price::OrTable>,
+    table_loaded: bool,
 }
 
 #[derive(Default)]
@@ -105,10 +113,29 @@ struct Tracked {
 
 impl TranscriptTracker {
     /// Facts for one transcript, reading only what is new since the last call.
+    /// Pricing uses the injected live table when present, else static list
+    /// prices — so unit tests stay deterministic (no network, no cache file).
     pub fn update(&mut self, path: &Path, context_window: u64) -> Result<TranscriptInfo> {
+        let table = self.table.as_ref();
         let tracked = self.files.entry(path.to_path_buf()).or_default();
         tracked.read_new(path)?;
-        Ok(tracked.info(context_window))
+        Ok(tracked.info(context_window, table))
+    }
+
+    /// Load the live OpenRouter price table once (cached file, refreshed at
+    /// most daily). Missing/unreachable just leaves static estimates in place.
+    /// Call once per process, before the refresh loop.
+    pub fn load_live_table(&mut self) {
+        if !self.table_loaded {
+            self.table = price::load_table();
+            self.table_loaded = true;
+        }
+    }
+
+    /// Inject a price table (tests and one-shot runs with a known table).
+    pub fn set_price_table(&mut self, table: price::OrTable) {
+        self.table = Some(table);
+        self.table_loaded = true;
     }
 
     /// Forget files that are no longer live pane transcripts.
@@ -204,7 +231,7 @@ impl Tracked {
         }
     }
 
-    fn info(&self, context_window: u64) -> TranscriptInfo {
+    fn info(&self, context_window: u64, table: Option<&price::OrTable>) -> TranscriptInfo {
         let mut info = TranscriptInfo {
             model: self.model.clone(),
             ctx_tokens: self.ctx_tokens,
@@ -212,6 +239,8 @@ impl Tracked {
             last_output: self.last_output.clone(),
             loop_cmd: detect_loop(&self.commands),
             cost_usd: None,
+            cost_basis: None,
+            tokens: None,
             tool_calls: self.tools.iter().cloned().collect(),
         };
         if let (Some(tokens), true) = (info.ctx_tokens, context_window > 0) {
@@ -219,21 +248,41 @@ impl Tracked {
         }
         let mut cost = 0.0;
         let mut priced = false;
+        let mut basis: Option<price::Basis> = None;
+        let mut tokens = 0u64;
         for (model, usage) in &self.totals {
-            if let Some(c) = price::cost_usd(
+            tokens += usage.input_tokens
+                + usage.cache_read_input_tokens
+                + usage.cache_creation_input_tokens
+                + usage.output_tokens;
+            let (c, b) = price::quote(
+                table,
                 model,
                 usage.input_tokens,
                 usage.cache_read_input_tokens,
                 usage.cache_creation_input_tokens,
                 usage.output_tokens,
-            ) {
+            );
+            if let Some(c) = c {
                 cost += c;
                 priced = true;
             }
+            // api outranks est outranks plan: the row shows its strongest source.
+            match (basis, b) {
+                (_, Some(price::Basis::Api)) => basis = Some(price::Basis::Api),
+                (Some(price::Basis::Api), _) => {}
+                (_, Some(price::Basis::Est)) => basis = Some(price::Basis::Est),
+                (None, b) => basis = b,
+                _ => {}
+            }
+        }
+        if tokens > 0 {
+            info.tokens = Some(tokens);
         }
         if priced {
             info.cost_usd = Some(cost);
         }
+        info.cost_basis = basis.map(|b| b.as_str().to_string());
         info
     }
 }

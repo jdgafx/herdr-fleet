@@ -128,6 +128,10 @@ pub struct AgentRow {
     pub ctx_percent: Option<u8>,
     /// Estimated spend for this session at list prices; `None` when unpriced.
     pub cost_usd: Option<f64>,
+    /// Where the figure came from: `api`, `est` or `plan` (KO).
+    pub cost_basis: Option<String>,
+    /// All tokens in this session, when a transcript reported usage.
+    pub tokens: Option<u64>,
     pub cwd: String,
     pub focused: bool,
     pub last_line: String,
@@ -159,6 +163,8 @@ impl AgentRow {
             model: None,
             ctx_percent: None,
             cost_usd: None,
+            cost_basis: None,
+            tokens: None,
             cwd: info.cwd.clone(),
             focused: info.focused,
             last_line: String::new(),
@@ -195,6 +201,15 @@ impl AgentRow {
                 None => {
                     row.model = Some("fresh".to_string());
                 }
+            }
+        }
+
+        // No transcript named a model (a muse-driven pane, say): show what the
+        // live launch resolves to rather than a bare dash. Cost still needs a
+        // usage source, which only transcripts provide.
+        if row.model.is_none() {
+            if let Ok(Some(live)) = roster::try_live_launch(herdr, &info.pane_id) {
+                row.model = roster::live_model(&live.argv);
             }
         }
 
@@ -236,6 +251,9 @@ fn keep_stale(row: &mut AgentRow, prev: Option<&AgentRow>) {
     if let Some(old) = prev {
         row.model = old.model.clone();
         row.ctx_percent = old.ctx_percent;
+        row.cost_usd = old.cost_usd;
+        row.cost_basis = old.cost_basis.clone();
+        row.tokens = old.tokens;
         row.last_line = old.last_line.clone();
         row.flags.push("stale".into());
     }
@@ -269,6 +287,8 @@ fn fill_from_transcript(
     row.model = detail.model.as_deref().map(transcript::pretty_model);
     row.ctx_percent = detail.ctx_percent;
     row.cost_usd = detail.cost_usd;
+    row.cost_basis = detail.cost_basis;
+    row.tokens = detail.tokens;
     row.tool_calls = detail.tool_calls;
     if let Some(output) = detail.last_output {
         row.last_line = truncate(&output, 120);
@@ -397,12 +417,12 @@ impl Fleet {
             price::fmt_usd(self.total_cost_usd)
         ));
         out.push_str(&format!(
-            "{:<8} {:<22} {:<8} {:<14} {:>4} {:>7}  {:<44} {}\n",
+            "{:<8} {:<22} {:<8} {:<14} {:>4} {:<12} {:<44} {}\n",
             "PANE", "NAME", "STATUS", "MODEL", "CTX", "COST", "LAST OUTPUT", "FLAGS"
         ));
         for a in &self.agents {
             out.push_str(&format!(
-                "{:<8} {:<22} {:<8} {:<14} {:>4} {:>7}  {:<44} {}\n",
+                "{:<8} {:<22} {:<8} {:<14} {:>4} {:<12} {:<44} {}\n",
                 a.pane_id,
                 truncate(&a.name, 22),
                 a.status,
@@ -410,7 +430,7 @@ impl Fleet {
                 a.ctx_percent
                     .map(|c| format!("{c}%"))
                     .unwrap_or_else(|| "-".into()),
-                a.cost_usd.map(price::fmt_usd).unwrap_or_else(|| "-".into()),
+                cost_cell(a),
                 truncate(&a.last_line, 44),
                 a.flags.join("; "),
             ));
@@ -429,6 +449,31 @@ impl Fleet {
             }
         }
         out
+    }
+}
+
+/// The COST cell: the figure with its basis (`$1.23 api`), `plan` for
+/// subscription billing (tokens only), or `-` when nothing priced it (KO).
+pub fn cost_cell(row: &AgentRow) -> String {
+    match (row.cost_usd, row.cost_basis.as_deref()) {
+        (Some(c), Some(b)) => format!("{} {b}", price::fmt_usd(c)),
+        (Some(c), None) => price::fmt_usd(c),
+        (None, Some("plan")) => match row.tokens {
+            Some(t) => format!("{} plan", fmt_tokens(t)),
+            None => "plan".to_string(),
+        },
+        _ => "-".to_string(),
+    }
+}
+
+/// `1234` -> `1.2k`, `2_500_000` -> `2.5M`.
+pub fn fmt_tokens(t: u64) -> String {
+    if t >= 1_000_000 {
+        format!("{:.1}M", t as f64 / 1_000_000.0)
+    } else if t >= 1_000 {
+        format!("{:.1}k", t as f64 / 1_000.0)
+    } else {
+        t.to_string()
     }
 }
 

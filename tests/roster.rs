@@ -2,7 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use herdr_fleet::roster::{drift, parse_line, shell_quote, Entry, Live, Roster};
+use herdr_fleet::roster::{
+    argv_command, drift, parse_line, resolve_model, shell_quote, Entry, Live, Roster,
+};
 
 const HOUSEKEEPING: &str = "- w1F:p1 housekeeping env -u ANTHROPIC_API_KEY -u ANTHROPIC_BASE_URL \
 CLAUDE_CODE_SUBAGENT_MODEL=haiku CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1 claude \
@@ -144,6 +146,111 @@ fn drift_names_each_difference() {
 #[test]
 fn a_pane_with_no_worker_is_drift() {
     assert_eq!(drift(&housekeeping(), None), vec!["not running"]);
+}
+
+#[test]
+fn wrapper_launchers_parse_and_resolve_their_real_model() {
+    // KO.2: cc-mimo lines parse, and the flag is a tier alias — the pane
+    // always runs MiMo Flash whatever --model says.
+    let line = "w1F:p1 housekeeping cc-mimo --dangerously-skip-permissions --model sonnet --effort medium ~";
+    let e = parse_line(line).unwrap().unwrap();
+    assert_eq!(e.command, "cc-mimo");
+    assert_eq!(
+        resolve_model(&e.command, e.model.as_deref()).as_deref(),
+        Some("xiaomi/mimo-v2.6-flash")
+    );
+    assert_eq!(
+        resolve_model("cc-mimo", Some("opus")).as_deref(),
+        Some("xiaomi/mimo-v2.6-flash")
+    );
+    // cc-muse maps the tier: opus -> wonder, everything else -> spark.
+    assert_eq!(
+        resolve_model("cc-muse", Some("opus")).as_deref(),
+        Some("muse-wonder-1.0")
+    );
+    assert_eq!(
+        resolve_model("cc-muse", Some("sonnet")).as_deref(),
+        Some("muse-spark-1.3-contributor")
+    );
+    assert_eq!(
+        resolve_model("cc-muse", None).as_deref(),
+        Some("muse-spark-1.3-contributor")
+    );
+    // Plain launchers pass the flag through.
+    assert_eq!(
+        resolve_model("claude", Some("sonnet")).as_deref(),
+        Some("sonnet")
+    );
+}
+
+#[test]
+fn no_model_drift_when_wrapper_tiers_agree() {
+    let e = parse_line(
+        "w1F:p1 housekeeping cc-mimo --dangerously-skip-permissions --model sonnet --effort medium ~",
+    )
+    .unwrap()
+    .unwrap();
+    // Same wrapper and tier on both sides: no drift, even though the live
+    // --model flag ("sonnet") is not the real model (mimo flash).
+    let l = live(
+        "cc-mimo --dangerously-skip-permissions --model sonnet --effort medium",
+        &[],
+    );
+    assert!(drift(&e, Some(&l)).is_empty());
+    // A different tier flag on the same wrapper still resolves to the same
+    // real model: no drift either.
+    let l2 = live(
+        "cc-mimo --dangerously-skip-permissions --model opus --effort medium",
+        &[],
+    );
+    assert!(drift(&e, Some(&l2)).is_empty());
+}
+
+#[test]
+fn drift_flags_a_different_launcher() {
+    let e = parse_line(
+        "w1F:p1 housekeeping cc-mimo --dangerously-skip-permissions --model sonnet --effort medium ~",
+    )
+    .unwrap()
+    .unwrap();
+    let l = live(
+        "claude --dangerously-skip-permissions --model sonnet --effort medium",
+        &[],
+    );
+    let d = drift(&e, Some(&l));
+    assert!(
+        d.contains(&"launcher claude != roster cc-mimo".to_string()),
+        "{d:?}"
+    );
+}
+
+#[test]
+fn versioned_muse_bin_detects_as_the_muse_launcher() {
+    let v: Vec<String> = [
+        "/home/chris2/.local/bin/muse-bin-1.4.9-R6297.1",
+        "--yolo",
+        "--model",
+        "muse-spark-1.3-contributor",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    assert_eq!(argv_command(&v), Some("muse"));
+}
+
+#[test]
+fn argv_command_skips_a_leading_env() {
+    let v: Vec<String> = [
+        "env",
+        "FOO=1",
+        "/home/u/.local/bin/cc-mimo",
+        "--model",
+        "sonnet",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    assert_eq!(argv_command(&v), Some("cc-mimo"));
 }
 
 #[test]

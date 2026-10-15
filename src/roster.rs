@@ -13,8 +13,48 @@ use serde::{Deserialize, Serialize};
 
 use crate::herdr::Herdr;
 
-/// Commands a roster line may launch.
-const LAUNCH_COMMANDS: [&str; 4] = ["claude", "cc-deepseek", "cc-luna", "cc-claude-luna"];
+/// Commands a roster line may launch. Bare `muse` is deliberately absent (MJ):
+/// auto-relaunch parses only claude/cc- launchers and cannot drive muse panes.
+/// `cc-mimo` (KI) and `cc-muse` (ME) are wrappers: their `--model` flag is a
+/// tier alias, and the real model comes from [`resolve_model`].
+const LAUNCH_COMMANDS: [&str; 6] = [
+    "claude",
+    "cc-deepseek",
+    "cc-luna",
+    "cc-claude-luna",
+    "cc-mimo",
+    "cc-muse",
+];
+
+/// The model a pane really runs, given its launch command and `--model` flag.
+/// Wrapper launchers fix the provider whatever the flag says (KO.2): cc-mimo
+/// is always MiMo Flash; cc-muse maps the tier (opus -> wonder, everything
+/// else -> spark, per ME).
+pub fn resolve_model(command: &str, model_flag: Option<&str>) -> Option<String> {
+    match command {
+        _ if command.ends_with("cc-mimo") => Some("xiaomi/mimo-v2.6-flash".to_string()),
+        _ if command.ends_with("cc-muse") => match model_flag {
+            Some("opus") => Some("muse-wonder-1.0".to_string()),
+            _ => Some("muse-spark-1.3-contributor".to_string()),
+        },
+        _ => model_flag.map(str::to_string),
+    }
+}
+
+/// The launch command from an argv: the element naming a known launcher
+/// (argv[0] is `env` when the pane was started with env overrides),
+/// canonicalised (`muse-bin-1.4.9-*` -> `muse`).
+pub fn argv_command(argv: &[String]) -> Option<&str> {
+    argv.iter().find_map(|a| {
+        let base = a.rsplit('/').next().unwrap_or(a);
+        canonical_command(base)
+    })
+}
+
+/// True for a wrapper launcher whose `--model` flag is a tier alias.
+fn is_wrapper(command: &str) -> bool {
+    command.ends_with("cc-mimo") || command.ends_with("cc-muse")
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Roster {
@@ -269,9 +309,32 @@ pub fn try_live_launch(herdr: &Herdr, pane: &str) -> Result<Option<Live>> {
     }))
 }
 
+/// Launchers recognised on a live pane. A superset of [`LAUNCH_COMMANDS`]:
+/// bare `muse` is detected so drift tells the truth about muse-driven panes
+/// ("launcher muse != roster cc-muse") instead of "not running", but it is
+/// never roster-valid — auto-relaunch cannot drive muse panes (MJ).
+const DETECT_COMMANDS: [&str; 7] = [
+    "claude",
+    "cc-deepseek",
+    "cc-luna",
+    "cc-claude-luna",
+    "cc-mimo",
+    "cc-muse",
+    "muse",
+];
+
+/// The roster/drift name for a process basename: versioned `muse-bin-1.4.9-*`
+/// binaries are the `muse` launcher.
+fn canonical_command(base: &str) -> Option<&str> {
+    if base == "muse" || base.starts_with("muse-bin") {
+        return Some("muse");
+    }
+    DETECT_COMMANDS.iter().find(|c| **c == base).copied()
+}
+
 fn is_launch_token(arg: &str) -> bool {
     let base = arg.rsplit('/').next().unwrap_or(arg);
-    LAUNCH_COMMANDS.contains(&base)
+    canonical_command(base).is_some()
 }
 
 /// The environment a process was started with, from `/proc/<pid>/environ`.
@@ -292,16 +355,48 @@ fn argv_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
     argv.get(i + 1).map(String::as_str)
 }
 
+/// The model a live pane runs, resolved through [`resolve_model`] — for
+/// display when no transcript names one (muse-driven panes, fresh wrappers).
+pub fn live_model(argv: &[String]) -> Option<String> {
+    let cmd = argv_command(argv)?;
+    resolve_model(cmd, argv_value(argv, "--model"))
+}
+
 /// Differences between a roster entry and the live launch. Empty when they match.
 pub fn drift(entry: &Entry, live: Option<&Live>) -> Vec<String> {
     let Some(live) = live else {
         return vec!["not running".into()];
     };
     let mut out = Vec::new();
-    if let Some(want) = &entry.model {
-        let got = argv_value(&live.argv, "--model");
-        if got != Some(want.as_str()) {
-            out.push(format!("model {} != roster {want}", got.unwrap_or("none")));
+    // Compare resolved models: on wrapper launchers (cc-mimo/cc-muse) the flag
+    // is a tier alias, so a live `--model sonnet` on cc-mimo matches a roster
+    // `cc-mimo --model sonnet` instead of flagging drift (KO.2).
+    let live_cmd = argv_command(&live.argv).unwrap_or("");
+    // A different launcher binary is itself drift.
+    if live_cmd != entry.command {
+        out.push(format!(
+            "launcher {} != roster {}",
+            if live_cmd.is_empty() {
+                "none"
+            } else {
+                live_cmd
+            },
+            entry.command
+        ));
+    }
+    // Compare resolved models: on wrapper launchers (cc-mimo/cc-muse) the flag
+    // is a tier alias, so a live `--model sonnet` on cc-mimo matches a roster
+    // `cc-mimo --model sonnet` instead of flagging drift (KO.2). A roster line
+    // with no `--model` on a plain launcher pins nothing.
+    if entry.model.is_some() || is_wrapper(&entry.command) {
+        let want = resolve_model(&entry.command, entry.model.as_deref());
+        let got = resolve_model(live_cmd, argv_value(&live.argv, "--model"));
+        if want != got {
+            out.push(format!(
+                "model {} != roster {}",
+                got.as_deref().unwrap_or("none"),
+                want.as_deref().unwrap_or("none")
+            ));
         }
     }
     if let Some(want) = &entry.effort {

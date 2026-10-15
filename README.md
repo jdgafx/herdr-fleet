@@ -64,12 +64,19 @@ The pane list itself comes from `herdr api snapshot` (falling back to
 
 ## Cost
 
-`COST` is an **estimate** at published list prices (dated 2026-10-13), computed as
-`input×in + cache-read×0.1×in + cache-write×1.25×in + output×out` for Anthropic
-models, and DeepSeek's off-peak rates for `deepseek-*` (its peak window — UTC
-01:00–04:00 and 06:00–10:00, Mon–Fri — is 2x). It is not billing truth: subscription
-panes cost nothing per token, and provider prices change. Unknown models show no
-cost rather than a wrong one.
+Every figure carries its basis. `COST` is the session's summed assistant-turn
+usage priced from the live OpenRouter models table (`api`,
+openrouter.ai/api/v1/models, cached 24h in
+`$XDG_CACHE_HOME/herdr-fleet/openrouter-models.json`), which covers every
+OpenRouter-served model — MiMo, Muse (`meta/muse-spark…`, `meta/muse-wonder`),
+Anthropic and DeepSeek ids alike. When the live table is unreachable, dated
+static list prices apply (`est`: Anthropic 2026-10-13, DeepSeek off-peak —
+its peak window, UTC 01:00–04:00 and 06:00–10:00 Mon–Fri, is 2x — plus a
+2026-10-15 snapshot for MiMo/Muse). Subscription panes (Codex/Luna) show
+tokens with `plan`, never dollars. Unknown models show `-` rather than a
+wrong figure. Wrapper launchers resolve to their real model (`cc-mimo` is
+always `xiaomi/mimo-v2.6-flash`; `cc-muse` maps the tier per ME), so their
+cost is priced, not blank.
 
 ## Install
 

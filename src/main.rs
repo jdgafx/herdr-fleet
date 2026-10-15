@@ -20,8 +20,9 @@ struct Cli {
     #[arg(long, global = true, env = "HERDR_BIN", default_value = "herdr")]
     herdr: String,
 
-    /// Directory of markdown checklists to summarise (optional)
-    #[arg(long, global = true)]
+    /// Directory of markdown checklists to summarise
+    /// (default: $HERDR_FLEET_QUEUE_DIR, else ~/dev/CC-MAESTRO/queue when it exists)
+    #[arg(long, global = true, env = "HERDR_FLEET_QUEUE_DIR")]
     queue_dir: Option<PathBuf>,
 
     /// Directory holding Claude Code session transcripts
@@ -123,9 +124,19 @@ enum Cmd {
     },
 }
 
+/// The queue directory when no `--queue-dir` was passed: the convoy's queue
+/// folder, so a bare `herdr-fleet` never reports "0 queues" while queues are
+/// open (KO.2). Explicit flag (or `$HERDR_FLEET_QUEUE_DIR`) always wins.
+fn default_queue_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let dir = home.join("dev").join("CC-MAESTRO").join("queue");
+    dir.is_dir().then_some(dir)
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let herdr = Herdr::new(cli.herdr);
+    let queue_dir = cli.queue_dir.clone().or_else(default_queue_dir);
 
     let roster_path = cli.roster.clone().unwrap_or_else(roster::default_path);
     let mut options = Options::default();
@@ -146,7 +157,7 @@ fn main() -> Result<()> {
     match cli.cmd.unwrap_or(Cmd::Tui) {
         Cmd::Tui => tui::run(
             herdr,
-            cli.queue_dir,
+            queue_dir,
             options,
             cli.interval,
             cli.stall_secs,
@@ -158,7 +169,8 @@ fn main() -> Result<()> {
         ),
         Cmd::List { json } => {
             let mut tracker = TranscriptTracker::default();
-            let fleet = Fleet::collect(&herdr, cli.queue_dir.as_deref(), &options, &mut tracker)?;
+            tracker.load_live_table();
+            let fleet = Fleet::collect(&herdr, queue_dir.as_deref(), &options, &mut tracker)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&fleet)?);
             } else {

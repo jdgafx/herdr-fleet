@@ -36,6 +36,9 @@ fn reads_model_context_output_and_loop() {
     // cache-write at Opus 5.5 list rates ($4 / $0.40 / $5 per 1M).
     let cost = info.cost_usd.expect("a priced session");
     assert!((cost - 0.373_934).abs() < 1e-6, "cost {cost}");
+    // No live table injected: static list prices, and every token counted.
+    assert_eq!(info.cost_basis.as_deref(), Some("est"));
+    assert_eq!(info.tokens, Some(898_430));
     // The last tool calls, newest last.
     assert_eq!(info.tool_calls.len(), 4);
     assert_eq!(info.tool_calls.last().unwrap().name, "Bash");
@@ -89,6 +92,23 @@ fn context_percent_uses_the_window() {
     let info = read_info(&path, 200_000).unwrap();
     // The same tokens over a 200k window: 89%.
     assert_eq!(info.ctx_percent, Some(89));
+}
+
+#[test]
+fn injected_live_table_prices_at_api_basis() {
+    use herdr_fleet::price::OrTable;
+    let (_, path) = write_fixture("livetable", SAMPLE);
+    let mut tracker = TranscriptTracker::default();
+    // Live table prices Opus 5.5 at $5/$25 per 1M (not the static $4/$20).
+    tracker.set_price_table(OrTable::parse_models_json(
+        r#"{"data":[{"id":"anthropic/claude-opus-5-5","pricing":{"prompt":"0.000005","completion":"0.000025"}}]}"#,
+    ));
+    let info = tracker.update(&path, 1_000_000).unwrap();
+    assert_eq!(info.cost_basis.as_deref(), Some("api"));
+    let expect = (20.0 * 5.0 + 895_260.0 * 5.0 + 3_150.0 * 5.0) / 1_000_000.0;
+    let cost = info.cost_usd.expect("a priced session");
+    assert!((cost - expect).abs() < 1e-9, "cost {cost} != {expect}");
+    assert_eq!(info.tokens, Some(898_430));
 }
 
 #[test]

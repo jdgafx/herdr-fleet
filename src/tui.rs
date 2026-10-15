@@ -19,7 +19,7 @@ use throbber_widgets_tui::{symbols, Throbber, ThrobberState};
 
 use crate::fetch::{Done, Worker};
 use crate::herdr::Herdr;
-use crate::model::{is_stalled, AgentRow, Fleet, Options};
+use crate::model::{self, is_stalled, AgentRow, Fleet, Options};
 use crate::parser::truncate;
 use crate::price;
 use crate::theme::{Theme, ThemeName};
@@ -383,10 +383,7 @@ impl App {
                 .ctx_percent
                 .map(|c| format!("{c}%"))
                 .unwrap_or_else(|| "-".into()),
-            cost: row
-                .cost_usd
-                .map(price::fmt_usd)
-                .unwrap_or_else(|| "-".into()),
+            cost: model::cost_cell(&row),
             queue,
             tools: row.tool_calls.iter().rev().take(5).rev().cloned().collect(),
             output: vec!["loading…".into()],
@@ -517,17 +514,23 @@ impl App {
         ])
     }
 
-    /// Cost as a five-cell gauge scaled to the fleet's highest spend, and the amount.
-    fn cost_line(&self, cost: Option<f64>, max: f64) -> Line<'static> {
-        let Some(c) = cost else {
-            return Line::from(Span::styled("-", Style::default().fg(self.theme.muted)));
+    /// Cost as a five-cell gauge scaled to the fleet's highest spend, the amount,
+    /// and its basis (`api`/`est`/`plan`, KO). Unpriced plan rows show tokens.
+    fn cost_line(&self, row: &model::AgentRow, max: f64) -> Line<'static> {
+        let Some(c) = row.cost_usd else {
+            let text = match (row.cost_basis.as_deref(), row.tokens) {
+                (Some("plan"), Some(t)) => format!("{} plan", model::fmt_tokens(t)),
+                (Some("plan"), None) => "plan".to_string(),
+                _ => "-".to_string(),
+            };
+            return Line::from(Span::styled(text, Style::default().fg(self.theme.muted)));
         };
         let filled = if max > 0.0 {
             ((c / max * 5.0).round() as usize).min(5)
         } else {
             0
         };
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled("█".repeat(filled), Style::default().fg(self.theme.accent)),
             Span::styled(
                 "░".repeat(5 - filled),
@@ -537,7 +540,14 @@ impl App {
                 format!(" {}", price::fmt_usd(c)),
                 Style::default().fg(self.theme.text),
             ),
-        ])
+        ];
+        if let Some(b) = row.cost_basis.as_deref() {
+            spans.push(Span::styled(
+                format!(" {b}"),
+                Style::default().fg(self.theme.muted),
+            ));
+        }
+        Line::from(spans)
     }
 
     /// Column widths sized to the data: NAME/MODEL/FLAGS get their content width
@@ -744,7 +754,7 @@ impl App {
                     Cell::from(self.ctx_line(a.ctx_percent, wide)),
                 ];
                 if wide {
-                    cells.push(Cell::from(self.cost_line(a.cost_usd, max_cost)));
+                    cells.push(Cell::from(self.cost_line(a, max_cost)));
                 }
                 cells.push(Cell::from(self.state_line(a)));
                 cells.push(Cell::from(Span::styled(
@@ -906,7 +916,7 @@ impl App {
             Span::styled(
                 truncate(
                     &format!(
-                        "  {}  ·  {}  ·  {}  ·  ctx {}  ·  ~{} est",
+                        "  {}  ·  {}  ·  {}  ·  ctx {}  ·  ~{}",
                         d.name, d.status, d.model, d.ctx, d.cost
                     ),
                     inner.saturating_sub(9),

@@ -46,6 +46,7 @@ impl Worker {
         let refresh_herdr = herdr.clone();
         thread::spawn(move || {
             let mut tracker = TranscriptTracker::default();
+            tracker.load_live_table();
             let mut prev: HashMap<String, AgentRow> = HashMap::new();
             while refresh_rx.recv().is_ok() {
                 // Several requests that piled up while a refresh ran are one refresh.
